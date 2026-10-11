@@ -1,6 +1,21 @@
-# Botaniks Inventory Management System
-Lot-based inventory and production tracking for a small matcha manufacturer.
-<!-- One-line tagline under the title, e.g. "Lot-based inventory & production tracking for a matcha manufacturer." -->
+# Botaniks Inventory System
+
+The inventory and production system a 6-person matcha and tea wholesaler runs on every day.
+
+I started as a warehouse employee at Botaniks Herbs & Tea, where stock was tracked in
+spreadsheets and by memory. That meant regular material shortages, manual counts, and
+batch details checked by hand. I built a demo, pitched it to the owner, and was moved
+off warehouse work to build it during paid hours as the only engineer.
+
+**What it changed:**
+
+- Replaced manual tracking of 70+ raw materials and 45 products
+- Saves the team 5 to 6 hours a week
+- Zero stockout-driven batch cancellations since the June 2026 launch, down from one every 1 to 2 months
+- Clients take 350kg+ pallet orders weekly, so a missed batch is a missed shipment
+
+**Stack:** Python, Flask, Gunicorn · PostgreSQL (prod) / SQLite (dev, test) · pandas, openpyxl ·
+Jinja2, HTML/CSS, JavaScript · pytest, Hypothesis · Docker, GitHub Actions, Render, Supabase, Cloudflare R2
 
 ![Python](https://img.shields.io/badge/Python-3-3776AB?logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/Flask-black?logo=flask&logoColor=white)
@@ -9,10 +24,6 @@ Lot-based inventory and production tracking for a small matcha manufacturer.
 ![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)
 ![pytest](https://img.shields.io/badge/pytest-0A9EDC?logo=pytest&logoColor=white)
 ![Render](https://img.shields.io/badge/Render-46E3B7?logo=render&logoColor=white)
-
-**Stack:** Python, Flask, Gunicorn · PostgreSQL (prod) / SQLite (dev, test) · pandas, openpyxl · Jinja2, HTML/CSS, JavaScript · pytest, Hypothesis · Docker, GitHub Actions, Render, Supabase, Cloudflare R2
-
-I started as a warehouse employee at Botaniks Herbs & Tea, a Santa Cruz matcha and tea wholesaler, where inventory was tracked in spreadsheets and by intuition. That caused daily material shortages, manual physical counts, and hand-checked batch details. I built a demo database, pitched it to the owner, and the company moved me off warehouse work to build it during paid hours, as the sole engineer. It replaced manual tracking of 70+ raw materials and 45 products for the 6-person operation, and has run daily since its June 2026 launch: containerized with Docker, served on Gunicorn, saving 5-6 hrs/week with zero stockout-driven batch cancellations since launch (previously every 1-2 months). Clients take 350kg+ pallets weekly.
 
 ## Table of Contents
 
