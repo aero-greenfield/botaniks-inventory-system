@@ -1321,6 +1321,8 @@ def mark_batch_as_shipped(batch_id):
 @requires_auth
 def batch_materials(batch_id):
     """
+    note: also called by get_shipped_batch_materials
+
     shows in details when clicking on detials of batch, 
     when calling function, it returns: material name, quantity, unit, batch material lot id, lot number, and batch id,
     but for batch details, user only sees: material name, quantity used, unit, and lot number. 
@@ -1333,7 +1335,11 @@ def batch_materials(batch_id):
         {"materials": [...], "planned": bool, "fifo": bool}
     planned = these quantities are reservations, not deductions.
     fifo    = deferred batch with no stored picks; the oldest lots get used at the planned date.
-    The three JS callers were updated with it: batches.html, manage_batches.html, edit_batch.html.
+    All five JS callers go through renderBatchMaterials() in static/js/batch_materials.js (loaded
+    globally in base.html), so this shape is unpacked in exactly one place: batches.html,
+    manage_batches.html, edit_batch.html, shipped_batches.html, shipment_detail.html.
+    The shipment-side two were missed when the shape changed and silently rendered "Failed to load
+    materials" until they were migrated too — keep new callers on the shared renderer.
     """
     rows = get_batch_materials(batch_id)
     planned = False

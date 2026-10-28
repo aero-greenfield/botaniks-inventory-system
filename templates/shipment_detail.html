@@ -146,18 +146,10 @@ document.querySelectorAll('.materials-toggle').forEach(function(btn) {
     if (!detail.dataset.loaded) {
       fetch('/batches/' + batchId + '/materials')
         .then(function(r) { return r.json(); })
-        .then(function(materials) {
-          if (materials.length === 0) {
-            detail.innerHTML = '<em>No materials recorded for this batch.</em>';
-          } else {
-            var html = '<table class="materials-inner-table"><thead><tr><th>Material</th><th>Lot #</th><th>Quantity Used</th><th>Unit</th><th>Cost/Unit</th></tr></thead><tbody>';
-            materials.forEach(function(m) {
-              var cpu = (m.cost_per_unit != null && m.cost_per_unit > 0) ? '$' + parseFloat(m.cost_per_unit).toFixed(2) : '—';
-              html += '<tr><td>' + m.material_name + '</td><td>' + m.lot_number + '</td><td>' + m.quantity_used + '</td><td>' + m.unit + '</td><td>' + cpu + '</td></tr>';
-            });
-            html += '</tbody></table>';
-            detail.innerHTML = html;
-          }
+        .then(function(data) {
+          // renderBatchMaterials (static/js/batch_materials.js) consumes the
+          // {materials, planned, fifo} payload from GET /batches/<id>/materials.
+          detail.innerHTML = renderBatchMaterials(data);
           detail.dataset.loaded = 'true';
         })
         .catch(function() {

@@ -172,17 +172,10 @@ document.querySelectorAll('.materials-toggle').forEach(function(btn) {
     if (!detail.dataset.loaded) {
       fetch('/batches/' + batchId + '/materials')
         .then(function(r) { return r.json(); })
-        .then(function(materials) {
-          if (materials.length === 0) {
-            detail.innerHTML = '<em>No materials recorded for this batch.</em>';
-          } else {
-            var html = '<table class="materials-inner-table"><thead><tr><th>Material</th><th>Quantity Used</th><th>Unit</th></tr></thead><tbody>';
-            materials.forEach(function(m) {
-              html += '<tr><td>' + m.material_name + '</td><td>' + m.quantity_used + '</td><td>' + m.unit + '</td></tr>';
-            });
-            html += '</tbody></table>';
-            detail.innerHTML = html;
-          }
+        .then(function(data) {
+          // renderBatchMaterials (static/js/batch_materials.js) consumes the
+          // {materials, planned, fifo} payload from GET /batches/<id>/materials.
+          detail.innerHTML = renderBatchMaterials(data);
           detail.dataset.loaded = 'true';
         })
         .catch(function() {
