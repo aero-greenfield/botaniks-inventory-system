@@ -365,6 +365,31 @@ def test_batches_page_shows_mix_prefix_and_original_total(client, auth, db,
     assert "/ 100" in html                  # Bug 4: 90 remaining / 100 originally produced
 
 
+def test_component_row_shows_kg_not_raw_grams_after_recipe_rename(
+    client, auth, db, make_material, make_lot, make_recipe
+):
+    # renamed-recipe fix, end to end. Reproduces the production incident: a 4 kg Component
+    # (4000 g output lot) whose recipe was later renamed printed a bare "4000" — the unit lookup
+    # went NULL, so the route skipped the gram->kg conversion AND the template dropped the unit
+    # suffix. Note "4000 < 236" was also false, which is why even the "/ total" suffix vanished.
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 10000)
+    make_recipe("KgMix", [{"material_name": "Matcha", "quantity_needed": 1000}],
+                batch_type="mix", product_unit="kg", product_dimension="mass")
+    add_to_batches("KgMix", 4, batch_number="KG9", batch_type="mix",
+                   lot_selections={mid: [{"lot_id": lid, "qty": 4000}]})
+
+    cur = db.cursor()
+    db.execute(cur, "UPDATE recipes SET product_name = %s WHERE product_name = %s",
+               ("KgMix V1", "KgMix"))
+    db.commit()
+
+    html = client.get("/batches", headers=auth).get_data(as_text=True)
+    assert "MIX-BATCH-KG9" in html
+    assert "4000" not in html, "Component row must not print the output lot in raw grams"
+    assert "kg" in html, "the unit suffix must render"
+
+
 # --- planned-deduction-mode feature: planned batches are visible and editable ---------
 def _planned_deferred_batch(make_material, make_lot, make_recipe):
     """A deferred Planned finished batch with one reserved lot. Returns (batch_id, material_id, lot_id)."""

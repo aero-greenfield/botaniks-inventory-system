@@ -425,10 +425,26 @@ def get_batches(page=None, per_page=50, sort='desc'):
            (quantity - (SELECT COALESCE(SUM(sb.quantity), 0)
                         FROM shipment_batches sb
                         WHERE sb.batch_id = batches.batch_id)) AS remaining,
-           -- product unit-of-measurement, looked up from the matching recipe by name so the
-           -- list can show the unit next to the quantity. NULL when no recipe matches.
-           (SELECT product_unit FROM recipes
-            WHERE LOWER(recipes.product_name) = LOWER(batches.product_name) LIMIT 1) AS product_unit,
+           -- product unit-of-measurement, so the list can show the unit next to the quantity.
+           -- CHANGED: renamed-recipe fix — the recipe lookup matches on free-text product_name,
+           -- which a recipe rename silently breaks (renaming recipe 13 "Foxtail Cafe Style
+           -- Matcha" -> "...V1" orphaned 43 existing mix batches). A NULL unit here makes the
+           -- route skip its base->display conversion (app.py ~1268), so a mix row printed its
+           -- output lot raw: "4000" instead of "4 kg".
+           -- Fall back to the unit on the house-made material, reached through actual foreign
+           -- keys (mix_lot_id -> lot.material_id -> raw_materials.unit). That material's unit
+           -- was written by _create_housemade_lot() from the recipe's product_unit at creation
+           -- time, i.e. the very unit the lot quantity was converted with — so it is both
+           -- correct and immune to later renames. Recipe precedence is kept, so nothing changes
+           -- for batches whose recipe still matches. Only reaches mix rows (mix_lot_id is NULL
+           -- otherwise); standard/finished batches stay NULL when their recipe is renamed.
+           COALESCE(
+             (SELECT product_unit FROM recipes
+              WHERE LOWER(recipes.product_name) = LOWER(batches.product_name) LIMIT 1),
+             (SELECT rm.unit FROM raw_material_lots l
+              JOIN raw_materials rm ON rm.material_id = l.material_id
+              WHERE l.lot_id = batches.mix_lot_id)
+           ) AS product_unit,
            -- mix-usage feature: for a Component (mix) batch, how much of its house-made output lot
            -- is still on hand (in BASE units — the route converts to product_unit) and how many
            -- finished batches have drawn from that lot. NULL for non-mix rows (mix_lot_id is NULL).

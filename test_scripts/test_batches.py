@@ -284,6 +284,79 @@ def test_get_batches_reports_mix_remaining_and_consumed_count(make_material, mak
     assert mix_row["mix_consumed_count"] == 1
 
 
+# --- renamed-recipe fix: product_unit must survive a recipe rename -------------------
+# get_batches recovers a batch's display unit by text-matching batches.product_name against
+# recipes.product_name. Renaming a recipe silently orphaned 43 production mix batches, so that
+# lookup returned NULL -> app.py skipped its base->display conversion -> a Component row printed
+# its output lot in raw grams ("4000") instead of "4 kg". The fallback resolves the unit through
+# foreign keys (mix_lot_id -> lot.material_id -> raw_materials.unit) instead of a name.
+def _rename_recipe(db, old_name, new_name):
+    cur = db.cursor()
+    db.execute(cur, "UPDATE recipes SET product_name = %s WHERE product_name = %s",
+               (new_name, old_name))
+    db.commit()
+
+
+def _ready_row(batch_id):
+    df, _ = get_batches(page=1, per_page=50)
+    return df[df["batch_id"] == batch_id].iloc[0]
+
+
+def test_mix_product_unit_survives_recipe_rename(make_material, make_lot, make_recipe, db):
+    # Mirrors production exactly: a kg-denominated Component of 4 kg stores a 4000 g output lot.
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 10000)
+    make_recipe("KgMix", [{"material_name": "Matcha", "quantity_needed": 1000}],
+                batch_type="mix", product_unit="kg", product_dimension="mass")
+    bid = add_to_batches("KgMix", 4, batch_number="KG1", batch_type="mix",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 4000}]})
+
+    # before the rename the recipe lookup supplies the unit
+    row = _ready_row(bid)
+    assert row["product_unit"] == "kg"
+    assert row["mix_remaining"] == 4000      # base units (grams)
+
+    # the production incident: recipe renamed, batch.product_name left pointing at the old name
+    _rename_recipe(db, "KgMix", "KgMix V1")
+
+    # regression: NULL here is what printed "4000" instead of "4 kg"
+    row = _ready_row(bid)
+    assert row["product_unit"] == "kg", "unit must fall back to the house-made material"
+    assert row["mix_remaining"] == 4000
+
+    # and the conversion the route performs (app.py ~1271) now yields the right display value
+    from services import units
+    assert float(units.from_base(row["mix_remaining"], row["product_unit"])) == 4.0
+
+
+def test_renamed_recipe_on_non_mix_batch_yields_null_unit_without_error(
+    make_material, make_lot, make_recipe, db
+):
+    # A standard/finished batch has mix_lot_id = NULL, so the fallback subquery returns NULL.
+    # That must degrade quietly to None, not raise — the route already guards on a falsy unit.
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 1000)
+    make_recipe("PlainTea", [{"material_name": "Matcha", "quantity_needed": 10}])
+    bid = add_to_batches("PlainTea", 1, batch_number="PT1",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 10}]})
+    assert _ready_row(bid)["product_unit"] == "g"
+
+    _rename_recipe(db, "PlainTea", "PlainTea V1")
+    assert _ready_row(bid)["product_unit"] is None
+
+
+def test_recipe_unit_keeps_precedence_over_housemade_fallback(make_material, make_lot, make_recipe, db):
+    # The fallback must not change behaviour for batches whose recipe still matches: COALESCE
+    # keeps the recipe's product_unit first even though a house-made unit is also reachable.
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 10000)
+    make_recipe("LbMix", [{"material_name": "Matcha", "quantity_needed": 100}],
+                batch_type="mix", product_unit="lb", product_dimension="mass")
+    bid = add_to_batches("LbMix", 2, batch_number="LB1", batch_type="mix",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 200}]})
+    assert _ready_row(bid)["product_unit"] == "lb"
+
+
 def test_finished_batch_cost_includes_component_cost(make_material, make_lot, make_recipe, db):
     # cost-of-component: a finished batch consuming a Component (mix) must include the mix's own
     # production cost. The mix output lot is given cost_per_unit = (input cost) / produced qty, which
