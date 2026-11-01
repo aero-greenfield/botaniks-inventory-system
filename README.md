@@ -10,7 +10,7 @@ off warehouse work to build it during paid hours as the only engineer.
 **What it changed:**
 
 - Replaced manual tracking of 70+ raw materials and 45 products
-- Saves the team 5 to 6 hours a week
+- Saves the team 3 to 4 hours a week
 - Zero stockout-driven batch cancellations since the June 2026 launch, down from one every 1 to 2 months
 - Clients take 350kg+ pallet orders weekly, so a missed batch is a missed shipment
 
