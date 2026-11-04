@@ -71,6 +71,9 @@ from services.batches import (
     get_all_batches_with_id, get_batch_by_id, mark_as_shipped, delete_batch,
     update_batch, update_batch_status, promote_batch_now, get_batch_materials,
     adjust_batch_material, check_batch_materials_stock,
+    # ADDED: quantity-edit-desync fix — update_batch now reconciles a batch's input deductions
+    #        and mix output lot, and raises this when the edit can't be honoured.
+    BatchReconcileError,
     get_batch_materials_for_reallocation,
     # ADDED: planned-deduction-mode feature — a deferred Planned batch has no batch_materials rows;
     #        its lot picks live in the planned_lot_selections JSON column and are read/written here.
@@ -1836,6 +1839,13 @@ def update_batch_details(batch_id):
                 back_link=True, back_link_url=f"/edit-batch/{batch_id}", back_link_label="Go back to Edit Batch"
             ), 400
         
+    # CHANGED: quantity-edit-desync fix — this block used to be the ONLY thing that reconciled a
+    # batch's raw-material deductions after a quantity change, and it is gated on a checkbox that
+    # is UNCHECKED by default. Leave it unticked and the deductions were silently never adjusted:
+    # all 8 desynced production batches are exactly that. Reconciliation is now the default,
+    # performed inside update_batch (which also resizes a mix batch's output lot, in the same
+    # transaction). This block is therefore no longer a gate — it only supplies EXPLICIT
+    # per-material overrides when the user chooses to type their own numbers.
     new_quantities = {}
     lot_selections = {}
     if request.form.get('adjust_deductions') == '1':
@@ -1874,7 +1884,25 @@ def update_batch_details(batch_id):
         and quantity is not None and float(existing[2]) != quantity
     )
 
-    result = update_batch(batch_id, product_name=product_name, quantity=quantity, notes=notes, expiration_date=expiration_date, planned_completion_date=planned_completion_date)
+    # CHANGED: quantity-edit-desync fix — the deduction adjustment used to run AFTER this call, in
+    # its own transaction (adjust_batch_material), so a failure there left the batch row already
+    # committed with its stock unreconciled. Both now happen inside update_batch, atomically.
+    try:
+        result = update_batch(
+            batch_id, product_name=product_name, quantity=quantity, notes=notes,
+            expiration_date=expiration_date, planned_completion_date=planned_completion_date,
+            material_adjustments=new_quantities or None,
+            lot_selections=lot_selections or None,
+        )
+    except BatchReconcileError as e:
+        # The edit can't be honoured — not enough stock to cover an increase, or the new quantity
+        # is below what has already been consumed from the batch's component lot. This message is
+        # built from quantities, not exception internals, so it is safe to show (see CLAUDE.md).
+        return render_template('error.html',
+            title="Cannot Change Quantity",
+            message=str(e),
+            back_link=True, back_link_url=f"/edit-batch/{batch_id}", back_link_label="Go back to Edit Batch"
+        ), 400
 
     if result:
         logging.info(f"Batch details updated: batch_id={batch_id}, product_name={product_name}, quantity={quantity}")
@@ -1886,17 +1914,13 @@ def update_batch_details(batch_id):
             flash('Quantity changed — lot selections were cleared. Re-select lots, or the oldest lots (FIFO) will be used at the planned date.', 'warning')
 
         if new_quantities:
-            adj_result = adjust_batch_material(batch_id, new_quantities, lot_selections or None)
-            if adj_result:
-                log_action('batch_materials_adjusted', f"batch_id={batch_id}, adjustments={new_quantities}")
-                # CHANGED: was url_for(..., msg=...) — moved to flash()
-                flash('Batch details and material deductions updated successfully', 'success')
-                return redirect(url_for('edit_batch', batch_id=batch_id))
-            else:
-                flash('Batch details saved but failed to adjust material deductions — insufficient stock or material not found', 'error')
-                return redirect(url_for('edit_batch', batch_id=batch_id))
-
-        flash('Batch details updated successfully', 'success')
+            log_action('batch_materials_adjusted', f"batch_id={batch_id}, adjustments={new_quantities}")
+            flash('Batch details and material deductions updated successfully', 'success')
+        elif quantity is not None:
+            log_action('batch_materials_reconciled', f"batch_id={batch_id}, quantity={quantity}, mode=proportional")
+            flash('Batch details updated — raw material deductions were adjusted to match the new quantity', 'success')
+        else:
+            flash('Batch details updated successfully', 'success')
         return redirect(url_for('edit_batch', batch_id=batch_id))
     else:
         flash('Failed to update batch details', 'error')

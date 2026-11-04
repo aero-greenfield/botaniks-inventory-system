@@ -47,9 +47,17 @@
         </div>
         <!-- Material deduction adjustment section (hidden until loaded) -->
         <div id="deduction-section" style="display:none;margin-top:16px;border-top:1px solid var(--border);padding-top:14px;">
+            {# CHANGED: quantity-edit-desync fix — this checkbox used to GATE whether raw material
+               deductions were adjusted at all, and being unchecked by default meant a quantity
+               edit silently left the batch's deductions (and a Component's output lot) sized for
+               the old quantity. Deductions are now always reconciled in proportion, server-side;
+               the checkbox only lets you override the amounts by hand. #}
+            <p style="font-size:12.5px;color:var(--text-muted);margin:0 0 10px;">
+                Raw material deductions are adjusted automatically to match the new quantity.
+            </p>
             <div class="checkbox-group" style="margin-bottom:10px;">
                 <input type="checkbox" id="adjust-deductions-cb" name="adjust_deductions" value="1">
-                <label for="adjust-deductions-cb" style="font-weight:600;">Also adjust raw material deductions</label>
+                <label for="adjust-deductions-cb" style="font-weight:600;">Set deduction amounts manually instead</label>
             </div>
             <div id="deduction-controls" style="display:none;">
                 {# CHANGED: planned-deduction-mode feature — these radios were named `deduction_mode`,

@@ -16,6 +16,7 @@ from services.batches import (
     get_batch_materials_for_reallocation, adjust_batch_material, check_batch_materials_stock,
     get_batch_by_id, get_batches, get_batches_planned, get_all_batches_with_id,
     get_planned_lot_selections, update_planned_lot_selections, clear_planned_lot_selections,
+    update_batch, BatchReconcileError,
 )
 from services.lots import get_material_stock_from_lots
 from services.materials import get_raw_material
@@ -1079,3 +1080,160 @@ def test_get_batches_shipped_sorts_by_date_shipped(db):
     assert list(df_default["date_shipped"]) == ["2024-03-01", "2024-02-01", "2024-01-01"]
     df_asc, _ = get_batches_shipped(page=1, per_page=50, sort="asc")
     assert list(df_asc["date_shipped"]) == ["2024-01-01", "2024-02-01", "2024-03-01"]
+
+
+# --- quantity-edit-desync fix --------------------------------------------------------
+# Editing a batch's quantity used to leave BOTH its input deductions and (for a mix batch) its
+# house-made output lot sized for the ORIGINAL quantity: update_batch was a bare `UPDATE batches`,
+# and the only reconciliation path was gated behind an unchecked "Also adjust raw material
+# deductions" checkbox. 8 production batches desynced that way, in both directions.
+def _bm_rows(db, batch_id):
+    """[(material_id, lot_id, quantity_used)] for a batch, ordered stably."""
+    cur = db.cursor()
+    db.execute(cur, """SELECT material_id, lot_id, quantity_used FROM batch_materials
+                       WHERE batch_id = %s ORDER BY batch_material_id""", (batch_id,))
+    return [(m, l, float(q)) for m, l, q in cur.fetchall()]
+
+
+def _kg_mix(make_material, make_lot, make_recipe, qty=4, stock=100000):
+    """A Ready kg-denominated Component of `qty` kg, consuming 1000 g of input per kg.
+    Mirrors the production shape: a 4 kg mix stores a 4000 g output lot.
+    Returns (batch_id, input_material_id, input_lot_id)."""
+    mid = make_material("Matcha")
+    lid = make_lot(mid, stock)
+    make_recipe("KgMix", [{"material_name": "Matcha", "quantity_needed": 1000}],
+                batch_type="mix", product_unit="kg", product_dimension="mass")
+    bid = add_to_batches("KgMix", qty, batch_number="QE1", batch_type="mix",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 1000 * qty}]})
+    return bid, mid, lid
+
+
+def test_quantity_edit_down_returns_inputs_and_shrinks_output_lot(make_material, make_lot, make_recipe, db):
+    bid, mid, lid = _kg_mix(make_material, make_lot, make_recipe, qty=4, stock=100000)
+    out_lot = _mix_lot_for(db, "KgMix")
+    assert _lot_qty(db, out_lot)[0] == 4000          # 4 kg produced, stored in base grams
+    assert _lot_qty(db, lid)[0] == 96000             # 100000 - 4000 g of input consumed
+
+    assert update_batch(bid, quantity=3) is True
+
+    # inputs scaled 4 -> 3 kg: 1000 g returned to the source lot
+    assert _bm_rows(db, bid) == [(mid, lid, 3000.0)]
+    assert _lot_qty(db, lid)[0] == 97000
+    # output lot resized to the new produced amount
+    assert _lot_qty(db, out_lot)[0] == 3000
+
+
+def test_quantity_edit_up_deducts_more_and_grows_output_lot(make_material, make_lot, make_recipe, db):
+    bid, mid, lid = _kg_mix(make_material, make_lot, make_recipe, qty=4, stock=100000)
+    out_lot = _mix_lot_for(db, "KgMix")
+
+    assert update_batch(bid, quantity=6) is True
+
+    assert _bm_rows(db, bid) == [(mid, lid, 6000.0)]
+    assert _lot_qty(db, lid)[0] == 94000             # 2000 g more consumed
+    assert _lot_qty(db, out_lot)[0] == 6000
+    # this is the direction that starved finished batches in production (batch 322, -11 kg)
+
+
+def test_quantity_edit_up_refused_when_input_stock_insufficient(make_material, make_lot, make_recipe, db):
+    # only 5000 g of input on hand; the 4 kg batch already took 4000, so 6 kg needs 2000 more
+    bid, mid, lid = _kg_mix(make_material, make_lot, make_recipe, qty=4, stock=5000)
+    out_lot = _mix_lot_for(db, "KgMix")
+
+    with pytest.raises(BatchReconcileError):
+        update_batch(bid, quantity=6)
+
+    # ATOMICITY: nothing may have been written — not the batch row, not the inputs, not the lot
+    assert float(get_batch_by_id(bid)[2]) == 4
+    assert _bm_rows(db, bid) == [(mid, lid, 4000.0)]
+    assert _lot_qty(db, lid)[0] == 1000
+    assert _lot_qty(db, out_lot)[0] == 4000
+
+
+def test_quantity_edit_refused_below_what_was_already_consumed(make_material, make_lot, make_recipe, db):
+    bid, mid, lid = _kg_mix(make_material, make_lot, make_recipe, qty=4, stock=100000)
+    out_lot = _mix_lot_for(db, "KgMix")
+    mix_mid = get_raw_material("KgMix")[0]
+    # a finished batch consumes 3 kg of the 4 kg component
+    make_recipe("FinishedKg", [{"material_name": "KgMix", "quantity_needed": 3000, "unit": "kg"}])
+    add_to_batches("FinishedKg", 1, batch_number="FQ1",
+                   lot_selections={mix_mid: [{"lot_id": out_lot, "qty": 3000}]})
+    assert _lot_qty(db, out_lot)[0] == 1000
+
+    with pytest.raises(BatchReconcileError) as err:
+        update_batch(bid, quantity=2)
+    assert "already been consumed" in str(err.value)
+
+    assert float(get_batch_by_id(bid)[2]) == 4
+    assert _lot_qty(db, out_lot)[0] == 1000
+
+
+def test_quantity_edit_scales_every_lot_row_of_a_multi_lot_material(make_material, make_lot, make_recipe, db):
+    # Production batch 295 draws material 20 from TWO lots. Reconciliation keyed on material_id
+    # with fetchone() would adjust only one row and leave the other stale, so scaling is keyed on
+    # batch_material_id and must preserve the original split across lots.
+    mid = make_material("Matcha")
+    l1 = make_lot(mid, 3000, lot_number="SPLIT-A")
+    l2 = make_lot(mid, 3000, lot_number="SPLIT-B")
+    make_recipe("SplitMix", [{"material_name": "Matcha", "quantity_needed": 1000}],
+                batch_type="mix", product_unit="kg", product_dimension="mass")
+    bid = add_to_batches("SplitMix", 4, batch_number="SP1", batch_type="mix",
+                         lot_selections={mid: [{"lot_id": l1, "qty": 2500},
+                                               {"lot_id": l2, "qty": 1500}]})
+    assert _bm_rows(db, bid) == [(mid, l1, 2500.0), (mid, l2, 1500.0)]
+
+    assert update_batch(bid, quantity=2) is True     # halve it
+
+    # BOTH rows halved, each returning to its own lot, split preserved
+    assert _bm_rows(db, bid) == [(mid, l1, 1250.0), (mid, l2, 750.0)]
+    assert _lot_qty(db, l1)[0] == 3000 - 1250
+    assert _lot_qty(db, l2)[0] == 3000 - 750
+
+
+def test_quantity_edit_on_standard_batch_reconciles_inputs_only(make_material, make_lot, make_recipe, db):
+    # A standard/finished batch has no output lot, but its INPUTS must still track the edit —
+    # production batches 206/331/332/334 are this case.
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 1000)
+    make_recipe("PlainTea", [{"material_name": "Matcha", "quantity_needed": 10}])
+    bid = add_to_batches("PlainTea", 10, batch_number="PQ1",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 100}]})
+    assert _lot_qty(db, lid)[0] == 900
+
+    assert update_batch(bid, quantity=8) is True
+
+    assert _bm_rows(db, bid) == [(mid, lid, 80.0)]
+    assert _lot_qty(db, lid)[0] == 920               # 20 g returned
+
+
+def test_non_quantity_edit_leaves_materials_untouched(make_material, make_lot, make_recipe, db):
+    bid, mid, lid = _kg_mix(make_material, make_lot, make_recipe, qty=4, stock=100000)
+    out_lot = _mix_lot_for(db, "KgMix")
+
+    assert update_batch(bid, notes="just a note") is True
+
+    assert _bm_rows(db, bid) == [(mid, lid, 4000.0)]
+    assert _lot_qty(db, lid)[0] == 96000
+    assert _lot_qty(db, out_lot)[0] == 4000
+
+
+def test_planned_mix_without_output_lot_is_unaffected(make_material, make_lot, make_recipe, db):
+    # A Planned mix has mix_lot_id NULL until promotion — there is nothing to resize, and the
+    # reconciliation must no-op rather than error.
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 10000)
+    make_recipe("PlannedMix", [{"material_name": "Matcha", "quantity_needed": 1000}],
+                batch_type="mix", product_unit="kg", product_dimension="mass")
+    bid = add_to_batches("PlannedMix", 4, batch_number="PM1", batch_type="mix",
+                         planned_completion_date="2999-01-01", deduction_mode="deferred",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 4000}]})
+    assert update_batch(bid, quantity=3) is True
+    assert float(get_batch_by_id(bid)[2]) == 3
+
+
+def test_reconcile_materials_can_be_opted_out(make_material, make_lot, make_recipe, db):
+    # The legacy no-reconcile behaviour must stay reachable explicitly, for callers that manage
+    # stock themselves.
+    bid, mid, lid = _kg_mix(make_material, make_lot, make_recipe, qty=4, stock=100000)
+    assert update_batch(bid, quantity=3, reconcile_materials=False) is True
+    assert _bm_rows(db, bid) == [(mid, lid, 4000.0)]   # inputs deliberately left alone

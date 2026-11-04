@@ -463,6 +463,52 @@ def test_mark_ready_with_short_stock_keeps_batch_planned_and_flashes(client, aut
     assert any(cat == "error" and "stays Planned" in msg for cat, msg in flashes)
 
 
+# --- quantity-edit-desync fix: reconciliation no longer needs a checkbox ---------------
+def test_quantity_edit_reconciles_stock_without_the_adjust_checkbox(
+    client, auth, make_material, make_lot, make_recipe
+):
+    # THE production gap: raw-material reconciliation used to run only when the form carried
+    # adjust_deductions=1, from a checkbox that is unchecked by default. Posting a changed
+    # quantity WITHOUT it silently left the deductions sized for the old quantity — which is how
+    # all 8 desynced batches happened. Note this POST deliberately omits adjust_deductions.
+    make_material("Matcha")
+    mid = get_material_id("Matcha")
+    lid = make_lot(mid, 1000)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}], batch_type="finished")
+    bid = add_to_batches("Latte", 10, batch_number="QR1",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 100}]})
+    assert get_material_stock_from_lots(mid) == 900
+
+    resp = client.post(f"/edit-batch/{bid}/update-details", headers=auth,
+                       data={"product_name": "Latte", "quantity": "8", "notes": ""})
+
+    assert resp.status_code == 302
+    assert float(get_batch_by_id(bid)[2]) == 8
+    # 20 g returned: the batch now claims 8 units, so it may only hold 80 g of deductions
+    assert get_material_stock_from_lots(mid) == 920
+
+
+def test_quantity_edit_rejected_when_stock_cannot_cover_the_increase(
+    client, auth, make_material, make_lot, make_recipe
+):
+    make_material("Matcha")
+    mid = get_material_id("Matcha")
+    lid = make_lot(mid, 105)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}], batch_type="finished")
+    bid = add_to_batches("Latte", 10, batch_number="QR2",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 100}]})
+    assert get_material_stock_from_lots(mid) == 5
+
+    resp = client.post(f"/edit-batch/{bid}/update-details", headers=auth,
+                       data={"product_name": "Latte", "quantity": "20", "notes": ""})
+
+    assert resp.status_code == 400
+    assert b"Cannot Change Quantity" in resp.data
+    # the whole edit rolled back — quantity and stock both untouched
+    assert float(get_batch_by_id(bid)[2]) == 10
+    assert get_material_stock_from_lots(mid) == 5
+
+
 def test_edit_page_opens_for_deferred_planned_batch(client, auth, make_material, make_lot, make_recipe):
     # Regression: this used to 404 ("Batch Materials Not Found") because a deferred batch has no
     # batch_materials rows, making every planned batch un-editable.

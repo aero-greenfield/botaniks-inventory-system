@@ -272,7 +272,12 @@ def init_database():
         CREATE TABLE IF NOT EXISTS batches(
             batch_id SERIAL PRIMARY KEY,
             product_name TEXT NOT NULL,
-            quantity INTEGER,
+            -- CHANGED: fractional-quantity fix — was INTEGER, the only quantity column in the
+            -- schema that wasn't NUMERIC/REAL. On Postgres that ROUNDED a fractional batch
+            -- quantity on insert (18.75 -> 19) while _create_housemade_lot() converted the
+            -- unrounded float for the output lot, so a mix batch and its lot diverged at
+            -- creation with no edit involved (3 production rows: batches 83/84/85).
+            quantity NUMERIC,
             date_completed TEXT,
             status TEXT DEFAULT 'Ready',
             notes TEXT,
@@ -297,7 +302,10 @@ def init_database():
         CREATE TABLE IF NOT EXISTS batches(
             batch_id INTEGER PRIMARY KEY AUTOINCREMENT,
             product_name TEXT NOT NULL,
-            quantity INTEGER,
+            -- CHANGED: fractional-quantity fix — see the Postgres branch above. SQLite doesn't
+            -- enforce INTEGER affinity so it stored 18.75 fine, which is exactly why the test
+            -- suite could never reproduce the Postgres rounding. Declared REAL for parity.
+            quantity REAL,
             date_completed TEXT,
             status TEXT DEFAULT 'Ready',
             notes TEXT,
