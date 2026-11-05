@@ -81,7 +81,8 @@ def create_database():
     
                    product_dimension TEXT,
 
-                   batch_type TEXT DEFAULT 'finished'
+                   batch_type TEXT DEFAULT 'finished',
+                   housemade_material_id INTEGER DEFAULT NULL
 
 
                    )
@@ -95,6 +96,11 @@ def create_database():
     # ADDED: batch-type-on-recipe feature — additive migration for pre-existing SQLite DBs.
     if "batch_type" not in _recipe_cols:
         cursor.execute("ALTER TABLE recipes ADD COLUMN batch_type TEXT DEFAULT 'finished'")
+    # ADDED: edit-path safety fix — the house-made material a mix recipe produces into, so a recipe
+    # rename can't split its component stock across two materials. Existing Postgres deploys:
+    #     ALTER TABLE recipes ADD COLUMN IF NOT EXISTS housemade_material_id INTEGER DEFAULT NULL;
+    if "housemade_material_id" not in _recipe_cols:
+        cursor.execute("ALTER TABLE recipes ADD COLUMN housemade_material_id INTEGER DEFAULT NULL")
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS recipe_materials(

@@ -68,8 +68,10 @@ from services.recipes import (
 )
 from services.batches import (
     add_to_batches, get_batches, get_batches_shipped, get_batches_planned,
-    get_all_batches_with_id, get_batch_by_id, mark_as_shipped, delete_batch,
+    get_all_batches_with_id, get_batch_by_id, delete_batch,
     update_batch, update_batch_status, promote_batch_now, get_batch_materials,
+    # ADDED: edit-path safety fix — manual status changes that would skip/repeat stock movements
+    get_status_change_error, BatchStatusError,
     adjust_batch_material, check_batch_materials_stock,
     # ADDED: quantity-edit-desync fix — update_batch now reconciles a batch's input deductions
     #        and mix output lot, and raises this when the edit can't be honoured.
@@ -1301,23 +1303,9 @@ def view_batches():
         back_link=True, back_link_url="/", back_link_label="Back to Home"
 )
 
-# mark as shipped button. 
-@app.route('/batches/<int:batch_id>/mark-shipped', methods=['POST']) # this is a button in batches.html for each batch, it sends a POST request to this route with the batch_id to mark that batch as shipped.
-@requires_auth
-def mark_batch_as_shipped(batch_id):
-    """
-    click button, mark batch as shipped. this is a POST route
-    
-    """
-    result = mark_as_shipped(batch_id) # call function to update batch status in database.
-    if not result:
-        return render_template('error.html',
-            title="Ship Failed",
-            message="Could not mark batch as shipped. The batch may not exist.",
-        ), 500
-    logging.info(f"Batch marked as shipped: batch_id={batch_id}")
-    log_action('batch_shipped', f"batch_id={batch_id}")
-    return redirect(url_for('view_batches')) # after marking as shipped, redirect back to batches page to see updated status.
+# REMOVED: edit-path safety fix — /batches/<id>/mark-shipped flipped a batch to 'Shipped' with no
+#          shipment_batches rows, contradicting the shipment-derived status. No template linked to
+#          it any more; shipping goes through /shipments.
 
 
 @app.route('/batches/<int:batch_id>/materials')
@@ -1984,7 +1972,15 @@ def change_batch_status(batch_id):
 
     new_status = request.form.get('status') # Get the new status from the form submission (e.g., "ready", "shipped", etc.)
 
-    
+    # ADDED: edit-path safety fix — check the transition BEFORE writing anything. The Planned branch
+    # below saves a planned_completion_date first, so a refused change must not get that far.
+    status_error = get_status_change_error(batch_id, new_status)
+    if status_error:
+        flash(status_error, 'error')
+        if request.form.get('next') == 'batches':
+            return redirect(url_for('view_batches'))
+        return redirect(url_for('edit_batch', batch_id=batch_id))
+
     if new_status == 'Planned': 
         planned_completion_date = request.form.get('planned_completion_date', '').strip() or None #get planned date of completion
         if not planned_completion_date:
@@ -2016,7 +2012,12 @@ def change_batch_status(batch_id):
                 return redirect(url_for('view_batches'))
             return redirect(url_for('edit_batch', batch_id=batch_id))
     else:
-        result = update_batch_status(batch_id, new_status)
+        try:
+            result = update_batch_status(batch_id, new_status)
+        except BatchStatusError as e:
+            # re-checked inside the write transaction; the message is user-facing (no internals)
+            flash(str(e), 'error')
+            return redirect(url_for('edit_batch', batch_id=batch_id))
     if result:
         logging.info(f"Batch status changed: batch_id={batch_id}, new_status={new_status}")
         log_action('batch_status_changed', f"batch_id={batch_id}, new_status={new_status}")

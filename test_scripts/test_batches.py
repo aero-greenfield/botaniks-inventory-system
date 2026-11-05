@@ -1237,3 +1237,138 @@ def test_reconcile_materials_can_be_opted_out(make_material, make_lot, make_reci
     bid, mid, lid = _kg_mix(make_material, make_lot, make_recipe, qty=4, stock=100000)
     assert update_batch(bid, quantity=3, reconcile_materials=False) is True
     assert _bm_rows(db, bid) == [(mid, lid, 4000.0)]   # inputs deliberately left alone
+
+
+# --- edit-path safety fixes ----------------------------------------------------------
+# Each test below reproduces a way an EDIT to referenced data corrupted (or could corrupt)
+# production records. See the 2026-11-05 audit.
+
+def _shipped_latte(make_material, make_lot, make_recipe, qty=10, ship=8):
+    """A standard batch of `qty`, with `ship` of it already on a shipment."""
+    from services.shipments import create_shipment
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 1000)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}])
+    bid = add_to_batches("Latte", qty, batch_number="SH1",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 10 * qty}]})
+    create_shipment({bid: ship}, date_shipped="2026-01-05")
+    return bid
+
+
+def test_quantity_edit_recomputes_shipment_status(make_material, make_lot, make_recipe, db):
+    # Production batch 206: made 10, shipped 8, quantity then edited to 8 -> status stayed
+    # 'Partially Shipped' although nothing was left. The edit must re-derive the status.
+    bid = _shipped_latte(make_material, make_lot, make_recipe, qty=10, ship=8)
+    assert _batch_status(db, bid)[0] == "Partially Shipped"
+    assert update_batch(bid, quantity=8) is True
+    assert _batch_status(db, bid)[0] == "Shipped"
+
+
+def test_quantity_edit_cannot_go_below_shipped(make_material, make_lot, make_recipe, db):
+    # Lowering a batch below what has already left the building would make "remaining" negative.
+    bid = _shipped_latte(make_material, make_lot, make_recipe, qty=10, ship=8)
+    with pytest.raises(BatchReconcileError):
+        update_batch(bid, quantity=5)
+    assert float(get_batch_by_id(bid)[2]) == 10          # whole edit rolled back
+    assert _batch_status(db, bid)[0] == "Partially Shipped"
+
+
+def test_raising_a_fully_shipped_batch_reopens_it(make_material, make_lot, make_recipe, db):
+    # A fully Shipped batch whose quantity is raised has stock left again; leaving it 'Shipped'
+    # made that remainder unshippable (create_shipment only accepts Ready/Partially Shipped).
+    bid = _shipped_latte(make_material, make_lot, make_recipe, qty=10, ship=10)
+    assert _batch_status(db, bid)[0] == "Shipped"
+    assert update_batch(bid, quantity=12) is True
+    assert _batch_status(db, bid)[0] == "Partially Shipped"
+
+
+def test_manual_override_rejected_for_material_drawn_from_two_lots(make_material, make_lot, make_recipe, db):
+    # _apply_material_adjustments is keyed on material_id: it moved stock for ONE lot row but then
+    # wrote the new total onto EVERY row of that material, double-counting usage. Refuse instead.
+    mid = make_material("Matcha")
+    lid1 = make_lot(mid, 15)
+    lid2 = make_lot(mid, 100)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}])
+    bid = add_to_batches("Latte", 2, batch_number="ML1",
+                         lot_selections={mid: [{"lot_id": lid1, "qty": 15}, {"lot_id": lid2, "qty": 5}]})
+    with pytest.raises(BatchReconcileError):
+        update_batch(bid, notes="x", material_adjustments={mid: 10})
+    cur = db.cursor()
+    db.execute(cur, "SELECT lot_id, quantity_used FROM batch_materials WHERE batch_id = %s ORDER BY lot_id", (bid,))
+    assert [(r[0], float(r[1])) for r in cur.fetchall()] == [(lid1, 15.0), (lid2, 5.0)]
+    assert float(_lot_qty(db, lid1)[0]) == 0           # nothing returned to either lot
+    assert float(_lot_qty(db, lid2)[0]) == 95
+
+
+def test_manual_override_still_works_for_single_lot_material(make_material, make_lot, make_recipe, db):
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 100)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}])
+    bid = add_to_batches("Latte", 2, batch_number="ML2",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 20}]})
+    assert update_batch(bid, notes="x", material_adjustments={mid: 25}) is True
+    assert float(_lot_qty(db, lid)[0]) == 75
+
+
+def _housemade_ids(db):
+    cur = db.cursor()
+    db.execute(cur, "SELECT material_id, name FROM raw_materials WHERE is_housemade ORDER BY material_id")
+    return cur.fetchall()
+
+
+def test_renamed_mix_recipe_keeps_feeding_the_same_housemade_material(make_material, make_lot, make_recipe, db):
+    # Production: recipe "Foxtail Cafe Style Matcha" renamed -> the next mix batch created a NEW
+    # house-made material under the new name, while finished recipes kept consuming the old one.
+    from services.recipes import update_recipe
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 1000)
+    rid = make_recipe("Comp", [{"material_name": "Matcha", "quantity_needed": 10}],
+                      batch_type="mix", product_unit="g", product_dimension="mass")
+    add_to_batches("Comp", 2, batch_number="R1", batch_type="mix",
+                   lot_selections={mid: [{"lot_id": lid, "qty": 20}]})
+    [(hm_id, _)] = _housemade_ids(db)
+
+    update_recipe(rid, product_name="Comp V2", notes=None, product_unit="g", product_dimension="mass",
+                  batch_type="mix", materials=[{"material_name": "Matcha", "quantity_needed": 10}])
+    add_to_batches("Comp V2", 3, batch_number="R2", batch_type="mix",
+                   lot_selections={mid: [{"lot_id": lid, "qty": 30}]})
+
+    assert [m for m, _ in _housemade_ids(db)] == [hm_id]          # no second material
+    cur = db.cursor()
+    db.execute(cur, "SELECT material_id FROM raw_material_lots WHERE lot_number = %s", ("MIX-BATCH-R2",))
+    assert cur.fetchone()[0] == hm_id
+
+
+def test_mix_never_lands_on_a_purchased_material_with_the_same_name(make_material, make_lot, make_recipe, db):
+    # Production: Vendi Bean mix output was stored on a PURCHASED material that happened to share the
+    # recipe's name. A purchased material must never silently become a mix's output.
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 1000)
+    bought = make_material("Comp")                       # purchased, not house-made
+    bought_lot = make_lot(bought, 50)
+    make_recipe("Comp", [{"material_name": "Matcha", "quantity_needed": 10}],
+                batch_type="mix", product_unit="g", product_dimension="mass")
+    with pytest.raises(ValueError):
+        add_to_batches("Comp", 2, batch_number="P1", batch_type="mix",
+                       lot_selections={mid: [{"lot_id": lid, "qty": 20}]})
+    assert float(_lot_qty(db, lid)[0]) == 1000           # nothing deducted
+    assert float(_lot_qty(db, bought_lot)[0]) == 50
+    cur = db.cursor()
+    db.execute(cur, "SELECT COUNT(*) FROM raw_material_lots WHERE material_id = %s", (bought,))
+    assert cur.fetchone()[0] == 1                         # no MIX lot added to it
+
+
+def test_existing_mix_output_material_without_flag_is_still_reused(make_material, make_lot, make_recipe, db):
+    # Compatibility with production's Vendi Bean row: a material NOT flagged house-made that already
+    # holds this product's MIX-BATCH lots is the de-facto output material, so keep using it.
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 1000)
+    legacy = make_material("Comp")
+    make_lot(legacy, 1, lot_number="MIX-BATCH-OLD1")
+    make_recipe("Comp", [{"material_name": "Matcha", "quantity_needed": 10}],
+                batch_type="mix", product_unit="g", product_dimension="mass")
+    add_to_batches("Comp", 2, batch_number="L1", batch_type="mix",
+                   lot_selections={mid: [{"lot_id": lid, "qty": 20}]})
+    cur = db.cursor()
+    db.execute(cur, "SELECT material_id FROM raw_material_lots WHERE lot_number = %s", ("MIX-BATCH-L1",))
+    assert cur.fetchone()[0] == legacy

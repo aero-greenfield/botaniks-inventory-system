@@ -592,3 +592,73 @@ def test_planned_date_of_tomorrow_does_not_auto_promote(client, auth, freeze_bus
     # and the lot must be untouched — nothing should have been deducted
     cur_db = get_material_stock_from_lots(mid)
     assert cur_db == 100
+
+
+# --- edit-path safety fix: status buttons can no longer skip or repeat stock movements ----
+def _status_flashes(client):
+    with client.session_transaction() as sess:
+        return [msg for cat, msg in sess.get("_flashes", []) if cat == "error"]
+
+
+def test_planned_batch_cannot_be_marked_shipped(client, auth, make_material, make_lot, make_recipe):
+    # Planned -> Shipped only flipped the label: a deferred batch never deducted its materials.
+    make_material("Matcha")
+    mid = get_material_id("Matcha")
+    make_lot(mid, 100)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}], batch_type="finished")
+    bid = add_to_batches("Latte", 1, batch_number="ST1", planned_completion_date="2999-01-01",
+                         batch_type="finished", deduction_mode="deferred", lot_selections=None)
+
+    resp = client.post(f"/edit-batch/{bid}/change-status", headers=auth, data={"status": "Shipped"})
+
+    assert resp.status_code == 302
+    assert get_batch_by_id(bid)[4] == "Planned"
+    assert get_material_stock_from_lots(mid) == 100
+    assert _status_flashes(client)
+
+
+def test_ready_mix_cannot_go_back_to_planned(client, auth, db, make_material, make_lot, make_recipe):
+    # Ready mix -> Planned -> Ready re-ran promotion and created a SECOND output lot (double stock).
+    make_material("Matcha")
+    mid = get_material_id("Matcha")
+    lid = make_lot(mid, 100)
+    make_recipe("Comp", [{"material_name": "Matcha", "quantity_needed": 10}], batch_type="mix")
+    bid = add_to_batches("Comp", 1, batch_number="ST2", batch_type="mix",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 10}]})
+
+    resp = client.post(f"/edit-batch/{bid}/change-status", headers=auth,
+                       data={"status": "Planned", "planned_completion_date": "2999-01-01"})
+
+    assert resp.status_code == 302
+    assert get_batch_by_id(bid)[4] == "Ready"
+    cur = db.cursor()
+    db.execute(cur, "SELECT COUNT(*) FROM raw_material_lots WHERE lot_number LIKE 'MIX-BATCH-%%'")
+    assert cur.fetchone()[0] == 1
+    assert _status_flashes(client)
+
+
+def test_ready_batch_cannot_be_marked_shipped_by_hand(client, auth, make_material, make_lot, make_recipe):
+    # Shipped status is derived from shipments; a hand-set 'Shipped' left the whole batch unallocated.
+    make_material("Matcha")
+    mid = get_material_id("Matcha")
+    lid = make_lot(mid, 100)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}], batch_type="finished")
+    bid = add_to_batches("Latte", 1, batch_number="ST3", batch_type="finished",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 10}]})
+
+    client.post(f"/edit-batch/{bid}/change-status", headers=auth, data={"status": "Shipped"})
+
+    assert get_batch_by_id(bid)[4] == "Ready"
+    assert _status_flashes(client)
+
+
+def test_legacy_mark_shipped_route_is_gone(client, auth, make_material, make_lot, make_recipe):
+    make_material("Matcha")
+    mid = get_material_id("Matcha")
+    lid = make_lot(mid, 100)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}], batch_type="finished")
+    bid = add_to_batches("Latte", 1, batch_number="ST4", batch_type="finished",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 10}]})
+    resp = client.post(f"/batches/{bid}/mark-shipped", headers=auth)
+    assert resp.status_code in (404, 405)
+    assert get_batch_by_id(bid)[4] == "Ready"

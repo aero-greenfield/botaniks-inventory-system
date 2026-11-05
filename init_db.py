@@ -175,7 +175,10 @@ def init_database():
             
             product_dimension TEXT,
            
-            batch_type TEXT DEFAULT 'finished'
+            batch_type TEXT DEFAULT 'finished',
+            -- ADDED: edit-path safety fix — the house-made material a mix recipe produces into.
+            -- Looking it up by product_name split stock when a recipe was renamed (Foxtail V2).
+            housemade_material_id INTEGER DEFAULT NULL
         )
         """)
     else:
@@ -188,7 +191,10 @@ def init_database():
             
             product_dimension TEXT,
            
-            batch_type TEXT DEFAULT 'finished'
+            batch_type TEXT DEFAULT 'finished',
+            -- ADDED: edit-path safety fix — the house-made material a mix recipe produces into.
+            -- Looking it up by product_name split stock when a recipe was renamed (Foxtail V2).
+            housemade_material_id INTEGER DEFAULT NULL
         )
         """)
     print("  ✅ recipes table created")
@@ -438,6 +444,14 @@ def upgrade_schema():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_bm_material_id    ON batch_materials(material_id)")
     try:
         cursor.execute("ALTER TABLE batches ADD COLUMN shipment_id INTEGER DEFAULT NULL REFERENCES shipments(shipment_id)")
+        conn.commit()
+    except Exception:
+        conn.rollback()  # column already exists
+    # ADDED: edit-path safety fix — recipes.housemade_material_id. Run this in the Supabase SQL editor
+    # BEFORE deploying the code that reads it (production does not run this file on deploy):
+    #     ALTER TABLE recipes ADD COLUMN IF NOT EXISTS housemade_material_id INTEGER DEFAULT NULL;
+    try:
+        cursor.execute("ALTER TABLE recipes ADD COLUMN housemade_material_id INTEGER DEFAULT NULL")
         conn.commit()
     except Exception:
         conn.rollback()  # column already exists

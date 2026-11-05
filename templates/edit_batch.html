@@ -354,9 +354,10 @@
     <form method="POST" action="/edit-batch/{{ batch[0] }}/change-status" autocomplete="off">
         <div class="radio-group">
             <label><input type="radio" name="status" value="Ready" {% if batch[4] == 'Ready' %}checked{% endif %}> Ready</label>
-            <label><input type="radio" name="status" value="Shipped" {% if batch[4] == 'Shipped' %}checked{% endif %}> Shipped</label>
+            {# REMOVED: edit-path safety fix — manual "Shipped" radio. Shipment status is derived from shipments. #}
             <label><input type="radio" name="status" value="Planned" id="status-planned" {% if batch[4] == 'Planned' %}checked{% endif %}> Planned</label>
         </div>
+        <p style="color:var(--text-muted);font-size:12px;margin-top:8px;">Shipped / Partially Shipped update automatically when this batch is added to a shipment.</p>
         <div id="planned-date-field" style="max-width:300px;margin-top:10px;">
             <label for="planned_completion_date_status">Planned Completion Date <span style="color:#c00">*</span></label>
             <input type="date" id="planned_completion_date_status" name="planned_completion_date" value="{{ batch[8] or '' }}">

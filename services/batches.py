@@ -11,12 +11,15 @@ import json
 _BATCH_UPDATABLE_COLS = frozenset({"product_name", "quantity", "date_completed", "notes",
                                     "batch_number", "expiration_date", "planned_completion_date"})
 
-# ADDED: batches.py calls get_raw_material (for mix batch logic in add_to_batches
-#        and promote_planned_batches) and get_recipe (for deduction and promotion).
-#        They live in their own service modules now, so we import them explicitly.
-from services.materials import get_raw_material
+# ADDED: batches.py calls get_recipe (for deduction and promotion), which lives in its own
+#        service module now, so we import it explicitly.
+# REMOVED: edit-path safety fix — get_raw_material import; the mix output material is now
+#          resolved by _resolve_housemade_material on the caller's transaction.
 from services.recipes import get_recipe, get_recipe_unit_and_dimension
 from services.lots import exhaust_lot_if_depleted
+# ADDED: edit-path safety fix — a quantity edit must re-derive shipment status the same way
+# shipments do. services.shipments imports nothing from this module, so there is no cycle.
+from services.shipments import _recompute_batch_status
 
 # ADDED: units-conversion-layer feature — mix batches store the produced housemade material's
 #        display unit/dimension from the recipe's product_unit and store the produced lot
@@ -75,6 +78,51 @@ def _quantities_match(a, b):
 # BATCHES FUNCTIONS
 # ========================
 
+def _resolve_housemade_material(db, cursor, product_name):
+    """Find the house-made material a mix product produces into. Returns (material_id or None,
+    recipe_id or None); None material means "create one". Uses the CALLER's transaction.
+
+    ADDED: edit-path safety fix. Order of trust:
+      1. recipes.housemade_material_id — set the first time the recipe produces, survives renames.
+      2. A house-made material with the product's name — recipes made before this fix, not yet linked.
+      3. A material NOT flagged house-made with that name is reused only if it already holds this
+         product's MIX-BATCH lots (production's Vendi Bean row is exactly that). Any other
+         same-named material is a purchased one: refuse rather than pour mix output into it.
+    """
+    db.execute(cursor, """
+        SELECT recipe_id, housemade_material_id FROM recipes
+        WHERE LOWER(product_name) = LOWER(%s) LIMIT 1
+    """, (product_name,))
+    recipe_row = cursor.fetchone()
+    recipe_id, linked_id = (recipe_row[0], recipe_row[1]) if recipe_row else (None, None)
+
+    if linked_id is not None:
+        db.execute(cursor, "SELECT 1 FROM raw_materials WHERE material_id = %s", (linked_id,))
+        if cursor.fetchone():
+            return linked_id, recipe_id
+        # linked material was deleted — fall through and resolve again
+
+    db.execute(cursor, """
+        SELECT material_id, is_housemade FROM raw_materials WHERE LOWER(name) = LOWER(%s)
+    """, (product_name,))
+    material_row = cursor.fetchone()
+    if material_row is None:
+        return None, recipe_id
+    material_id, is_housemade = material_row
+    if is_housemade:
+        return material_id, recipe_id
+
+    db.execute(cursor, """
+        SELECT 1 FROM raw_material_lots WHERE material_id = %s AND lot_number LIKE %s LIMIT 1
+    """, (material_id, 'MIX-BATCH-%'))
+    if cursor.fetchone():
+        return material_id, recipe_id
+
+    raise ValueError(
+        f"A purchased material is already named '{product_name}', so this component's output "
+        f"can't be stored under that name. Rename the purchased material (or the recipe) first.")
+
+
 def _create_housemade_lot(db, cursor, product_name, quantity, batch_number, received_date, batch_id):
     """Create (or reuse) the house-made raw_material for a mix/Component product and insert a
     lot for the produced quantity. Shared by add_to_batches (immediate mix) and
@@ -116,9 +164,12 @@ def _create_housemade_lot(db, cursor, product_name, quantity, batch_number, rece
     """, (batch_id,))
     is_organic = bool(cursor.fetchone()[0])
 
-    existing_mix = get_raw_material(product_name)
-    if existing_mix:
-        mix_material_id = existing_mix[0]
+    # CHANGED: edit-path safety fix — was get_raw_material(product_name), a bare name lookup. Renaming
+    # a recipe made the next mix batch create a NEW material (production: Foxtail V2 split from the
+    # materials finished recipes consume), and a purchased material sharing the name was silently
+    # reused as the output (production: Vendi Bean). The recipe now remembers its material by id.
+    mix_material_id, recipe_id = _resolve_housemade_material(db, cursor, product_name)
+    if mix_material_id is not None:
         # overwrite with the latest batch's organic value (per "update to latest batch").
         # Also force is_edible TRUE: a house-made mix is a food product, and the organic flag
         # only propagates to finished batches if the mix counts as an edible input. Re-making the
@@ -132,6 +183,12 @@ def _create_housemade_lot(db, cursor, product_name, quantity, batch_number, rece
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (product_name, 'Mix', product_unit, 0, True, True, is_organic, dimension))
         mix_material_id = db.get_last_insert_id(cursor)
+
+    # ADDED: edit-path safety fix — remember the link so later renames keep feeding this material.
+    if recipe_id is not None:
+        db.execute(cursor, """
+            UPDATE recipes SET housemade_material_id = %s WHERE recipe_id = %s
+        """, (mix_material_id, recipe_id))
 
     # cost-of-component feature — give the house-made lot a cost_per_unit so the component's cost
     # rolls up into any finished batch that consumes it (the finished batch records this lot's
@@ -634,35 +691,9 @@ def get_batches_shipped(page=None, per_page=50, sort='desc'):
     finally:
         db.close()
 
-def mark_as_shipped(batch_id):
-    """Marks a batch as shipped"""
-    db = get_db_connection()
-    cursor = db.cursor()
-
-    try:
-        db.execute(cursor, """
-        UPDATE batches
-        SET status = 'Shipped', date_shipped = %s
-        WHERE batch_id = %s
-        """, (datetime.now().strftime('%Y-%m-%d'), batch_id))
-
-
-        if cursor.rowcount == 0: # make sure the batch id exists and was updated
-            print(f"Batch ID {batch_id} not found. No batch marked as shipped.") # if doesnt exist, there was an error marking batch as shipped.
-            db.rollback()
-            return False
-
-
-        db.commit()
-        print(f" Marked batch {batch_id} as shipped")
-        return True
-
-    except Exception as e:
-        logging.error(f" Error: {e}")
-        db.rollback()
-        return False
-    finally:
-        db.close()
+# REMOVED: edit-path safety fix — mark_as_shipped(batch_id) set status='Shipped' with no
+#          shipment_batches rows. Its only caller (/batches/<id>/mark-shipped) is gone;
+#          shipment status comes from services.shipments._recompute_batch_status.
 
 def delete_batch(batch_id, materials_to_reallocate=None, reallocate=False):
     """
@@ -1008,6 +1039,20 @@ def update_batch(batch_id, product_name=None, quantity=None, date_completed=None
         if "quantity" in field:
             _reconcile_mix_output_lot(db, cursor, batch_id, field["quantity"])
 
+            # ADDED: edit-path safety fix — a quantity edit used to ignore shipments entirely.
+            # Lowering a batch below what has already shipped made its remaining negative, and the
+            # status was never re-derived (production batch 206: 8 of 8 shipped, still 'Partially
+            # Shipped'). Refuse the impossible edit, then re-derive status from the allocations.
+            db.execute(cursor, """
+                SELECT COALESCE(SUM(quantity), 0) FROM shipment_batches WHERE batch_id = %s
+            """, (batch_id,))
+            shipped = float(cursor.fetchone()[0] or 0)
+            if float(field["quantity"]) + _QTY_EPSILON_G < shipped:
+                raise BatchReconcileError(
+                    f"Cannot reduce this batch to {float(field['quantity']):g}: "
+                    f"{shipped:g} has already been shipped.")
+            _recompute_batch_status(cursor, db, batch_id)
+
         db.commit()
         logging.info(f"Updated batch with id:{batch_id}")
 
@@ -1029,15 +1074,76 @@ def update_batch(batch_id, product_name=None, quantity=None, date_completed=None
         db.close()
 
 
+class BatchStatusError(ValueError):
+    """A manual status change that would skip or repeat a stock movement.
+
+    ADDED: edit-path safety fix. Subclasses ValueError like BatchReconcileError; carries a
+    user-facing reason for the route to flash.
+    """
+
+
+def _status_change_error(db, cursor, batch_id, new_status):
+    """Return why a MANUAL status change is not allowed, or None if it is.
+
+    ADDED: edit-path safety fix. The status buttons used to only relabel the batch, which let a
+    user skip or repeat stock movements:
+      * Planned -> Shipped never ran promotion, so a deferred batch never deducted its materials.
+      * Ready mix -> Planned -> Ready re-ran promotion and created a SECOND output lot.
+      * A hand-set 'Shipped' (or 'Ready' on a shipped batch) contradicted shipment_batches, which
+        is the real source of a batch's shipment status (_recompute_batch_status).
+    Planned -> Ready stays allowed: the route sends it through promote_batch_now.
+    """
+    db.execute(cursor, """
+        SELECT status, mix_lot_id,
+               (SELECT COUNT(*) FROM batch_materials bm WHERE bm.batch_id = b.batch_id),
+               (SELECT COUNT(*) FROM shipment_batches sb WHERE sb.batch_id = b.batch_id)
+        FROM batches b WHERE b.batch_id = %s
+    """, (batch_id,))
+    row = cursor.fetchone()
+    if row is None:
+        return "Batch not found."
+    current, mix_lot_id, material_rows, shipment_rows = row
+
+    if new_status == current:
+        return None
+    if new_status not in ('Ready', 'Planned'):
+        return ("Shipped status is set automatically when a batch is added to a shipment. "
+                "Create a shipment for this batch instead.")
+    if shipment_rows:
+        return ("This batch is on a shipment, so its status follows its shipments. "
+                "Edit or delete the shipment instead.")
+    if new_status == 'Planned' and (material_rows or mix_lot_id):
+        return ("This batch has already used its materials, so it can't go back to Planned. "
+                "Delete and re-create it if it was entered by mistake.")
+    return None
+
+
+def get_status_change_error(batch_id, new_status):
+    """Public, read-only wrapper around _status_change_error for the route to check up front."""
+    db = get_db_connection()
+    cursor = db.cursor()
+    try:
+        return _status_change_error(db, cursor, batch_id, new_status)
+    finally:
+        db.close()
+
+
 def update_batch_status(batch_id, new_status):
     """
     changes the status of batch, only changes status, not other details.
+
+    CHANGED: edit-path safety fix — raises BatchStatusError for a change that would skip or
+    repeat a stock movement (see _status_change_error).
     """
 
     db = get_db_connection()
     cursor = db.cursor()
 
     try:
+        reason = _status_change_error(db, cursor, batch_id, new_status)
+        if reason:
+            raise BatchStatusError(reason)
+
         if new_status == 'Shipped':
             db.execute(cursor, """
             UPDATE batches
@@ -1068,6 +1174,10 @@ def update_batch_status(batch_id, new_status):
         db.commit()
         logging.info(f"Batch {batch_id} status updated to {new_status}")
         return True
+
+    except BatchStatusError:
+        db.rollback()
+        raise
 
     except Exception as e:
         logging.error(f"Error updating batch status: {e}")
@@ -1787,9 +1897,22 @@ def _apply_material_adjustments(db, cursor, batch_id, new_quantities: dict, lot_
             SELECT quantity_used, lot_id FROM batch_materials
             WHERE batch_id = %s AND material_id = %s
         """, (batch_id, material_id))
-        row = cursor.fetchone()
-        if row is None:
+        rows = cursor.fetchall()
+        if not rows:
             raise BatchReconcileError(f"No batch_material record for batch {batch_id}, material {material_id}")
+        # ADDED: edit-path safety fix — this function is keyed on material_id: it moved stock for
+        # the FIRST lot row only, then the UPDATE below wrote the new total onto EVERY row of the
+        # material, double-counting usage. One total can't say how to split across lots, so refuse;
+        # a quantity edit still reconciles these batches correctly via _scale_batch_material_rows.
+        if len(rows) > 1:
+            db.execute(cursor, "SELECT name FROM raw_materials WHERE material_id = %s", (material_id,))
+            name_row = cursor.fetchone()
+            label = name_row[0] if name_row else f"Material {material_id}"
+            raise BatchReconcileError(
+                f"{label} on this batch was taken from {len(rows)} different lots, so "
+                f"its deduction can't be overridden with one number. Change the batch quantity "
+                f"instead — deductions are adjusted automatically.")
+        row = rows[0]
 
         old_qty = row[0]
         original_lot_id = row[1]
