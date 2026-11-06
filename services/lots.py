@@ -464,7 +464,11 @@ def update_lot(lot_id, lot_number=None, quantity=None, received_date=None, expir
     if not field:
         raise ValueError("No fields provided for update.")
     
-    #cant update quantity for housemade lots, this is done in batch field. 
+    # Can't edit a house-made lot's quantity here — it is derived from the mix batch that produced
+    # it, so the batch is the single entry point. CHANGED: that was already the intent, but the
+    # place this deferred to was empty: update_batch never touched the output lot, so a quantity
+    # edit desynced the two (8 production batches). update_batch now reconciles it for real, via
+    # _reconcile_mix_output_lot, so this block correctly keeps the lot side read-only.
     if (is_housemade or (lot_number and lot_number.startswith("MIX-BATCH-"))) and 'quantity' in field:
         logging.warning(f"Attempted to update quantity for housemade lot {lot_id}. This is not allowed. Quantity will not be updated.")
         del field['quantity']

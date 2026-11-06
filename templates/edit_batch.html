@@ -47,9 +47,17 @@
         </div>
         <!-- Material deduction adjustment section (hidden until loaded) -->
         <div id="deduction-section" style="display:none;margin-top:16px;border-top:1px solid var(--border);padding-top:14px;">
+            {# CHANGED: quantity-edit-desync fix — this checkbox used to GATE whether raw material
+               deductions were adjusted at all, and being unchecked by default meant a quantity
+               edit silently left the batch's deductions (and a Component's output lot) sized for
+               the old quantity. Deductions are now always reconciled in proportion, server-side;
+               the checkbox only lets you override the amounts by hand. #}
+            <p style="font-size:12.5px;color:var(--text-muted);margin:0 0 10px;">
+                Raw material deductions are adjusted automatically to match the new quantity.
+            </p>
             <div class="checkbox-group" style="margin-bottom:10px;">
                 <input type="checkbox" id="adjust-deductions-cb" name="adjust_deductions" value="1">
-                <label for="adjust-deductions-cb" style="font-weight:600;">Also adjust raw material deductions</label>
+                <label for="adjust-deductions-cb" style="font-weight:600;">Set deduction amounts manually instead</label>
             </div>
             <div id="deduction-controls" style="display:none;">
                 {# CHANGED: planned-deduction-mode feature — these radios were named `deduction_mode`,
@@ -113,7 +121,23 @@
         .then(function(payload) {
             var data = (payload && payload.materials) || [];
             if (isDeferredPlanned || !data.length) return;
-            materials = data;
+            // CHANGED: edit-path safety fix — one row per INGREDIENT. An ingredient taken from two
+            // lots used to render two inputs with the same name, and only the first was submitted.
+            // quantity_used is the exact total in the display unit (the rounded string is display-only).
+            var byMaterial = {};
+            data.forEach(function(m) {
+                var g = byMaterial[m.material_id];
+                if (!g) {
+                    g = byMaterial[m.material_id] = {
+                        material_id: m.material_id, material_name: m.material_name, unit: m.unit,
+                        quantity_used: 0, lots: []
+                    };
+                    materials.push(g);
+                }
+                g.quantity_used += m.quantity_used_exact;
+                if (m.lot_number) g.lots.push(m.lot_number);
+            });
+            data = materials;
             var fetches = data.map(function(m) {
                 return fetch('/api/available-lots/' + m.material_id)
                     .then(function(r) { return r.json(); })
@@ -139,22 +163,15 @@
             var lots = availableLots[m.material_id] || [];
             var lotCell;
             if (isIncreasing) {
-                var opts = lots.map(function(l) {
-                    return '<option value="' + l.lot_id + '">Lot ' + l.lot_number + ' (' + l.quantity + ' avail)</option>';
-                }).join('');
-                if (!opts) {
-                    lotCell = '<span style="color:var(--danger);font-size:12px;">No lots available</span>';
-                } else {
-                    lotCell = '<select id="lot-select-' + i + '" data-material-id="' + m.material_id + '" style="font-size:12px;max-width:200px;">' + opts + '</select>';
-                }
+                lotCell = lotSelectHtml(i, m, lots, '');
             } else {
-                lotCell = '<span style="color:var(--text-muted);font-size:12px;">— original lot</span>';
+                lotCell = originalLotsHtml(m);
             }
 
             var tr = document.createElement('tr');
             tr.innerHTML =
                 '<td style="padding:4px 8px;">' + m.material_name + '</td>' +
-                '<td style="text-align:right;padding:4px 8px;">' + m.quantity_used + '</td>' +
+                '<td style="text-align:right;padding:4px 8px;">' + (Math.round(m.quantity_used * 10000) / 10000) + '</td>' +
                 '<td style="text-align:right;padding:4px 8px;">' +
                     '<input type="number" step="any" min="0" name="material_' + m.material_id + '" ' +
                     'value="' + newVal + '" ' +
@@ -189,18 +206,29 @@
         if (isIncreasing) {
             // Preserve current selection if possible
             var currentSel = (cell.querySelector('select') || {}).value;
-            var opts = lots.map(function(l) {
-                var sel = String(l.lot_id) === String(currentSel) ? ' selected' : '';
-                return '<option value="' + l.lot_id + '"' + sel + '>Lot ' + l.lot_number + ' (' + l.quantity + ' avail)</option>';
-            }).join('');
-            if (!opts) {
-                cell.innerHTML = '<span style="color:var(--danger);font-size:12px;">No lots available</span>';
-            } else {
-                cell.innerHTML = '<select id="lot-select-' + i + '" data-material-id="' + m.material_id + '" style="font-size:12px;max-width:200px;">' + opts + '</select>';
-            }
+            cell.innerHTML = lotSelectHtml(i, m, lots, currentSel);
         } else {
-            cell.innerHTML = '<span style="color:var(--text-muted);font-size:12px;">— original lot</span>';
+            cell.innerHTML = originalLotsHtml(m);
         }
+    }
+
+    // ADDED: edit-path safety fix — "Auto" (the default) lets the server draw the extra amount from
+    // the batch's own lots first, then the oldest usable lots; picking a lot only makes it go first.
+    function lotSelectHtml(i, m, lots, currentSel) {
+        if (!lots.length) {
+            return '<span style="color:var(--danger);font-size:12px;">No lots available</span>';
+        }
+        var opts = '<option value="">Auto (oldest first)</option>' + lots.map(function(l) {
+            var sel = String(l.lot_id) === String(currentSel) ? ' selected' : '';
+            return '<option value="' + l.lot_id + '"' + sel + '>Lot ' + l.lot_number + ' (' + l.quantity + ' avail)</option>';
+        }).join('');
+        return '<select id="lot-select-' + i + '" data-material-id="' + m.material_id + '" style="font-size:12px;max-width:200px;">' + opts + '</select>';
+    }
+
+    function originalLotsHtml(m) {
+        var label = m.lots.length > 1 ? 'original lots: ' : 'original lot';
+        var names = m.lots.length > 1 ? m.lots.join(', ') : '';
+        return '<span style="color:var(--text-muted);font-size:12px;">— ' + label + names + '</span>';
     }
 
     function getProportionalValues() {
@@ -250,9 +278,9 @@
             return;
         }
 
-        // Collect lot selections for materials with positive delta
+        // Collect lot selections for materials with positive delta. CHANGED: edit-path safety fix —
+        // a specific lot is optional now ("Auto" = server picks), so no blocking alert.
         var selections = {};
-        var missingLot = false;
         materials.forEach(function(m, i) {
             var inp = document.getElementById('mat-input-' + i);
             var newVal = parseFloat((inp || {}).value) || 0;
@@ -260,17 +288,9 @@
                 var sel = document.getElementById('lot-select-' + i);
                 if (sel && sel.value) {
                     selections[m.material_id] = parseInt(sel.value);
-                } else {
-                    missingLot = true;
                 }
             }
         });
-
-        if (missingLot) {
-            e.preventDefault();
-            alert('Please select a lot for each material whose quantity is increasing.');
-            return;
-        }
 
         lotSelectionsInput.value = JSON.stringify(selections);
     });
@@ -346,9 +366,10 @@
     <form method="POST" action="/edit-batch/{{ batch[0] }}/change-status" autocomplete="off">
         <div class="radio-group">
             <label><input type="radio" name="status" value="Ready" {% if batch[4] == 'Ready' %}checked{% endif %}> Ready</label>
-            <label><input type="radio" name="status" value="Shipped" {% if batch[4] == 'Shipped' %}checked{% endif %}> Shipped</label>
+            {# REMOVED: edit-path safety fix — manual "Shipped" radio. Shipment status is derived from shipments. #}
             <label><input type="radio" name="status" value="Planned" id="status-planned" {% if batch[4] == 'Planned' %}checked{% endif %}> Planned</label>
         </div>
+        <p style="color:var(--text-muted);font-size:12px;margin-top:8px;">Shipped / Partially Shipped update automatically when this batch is added to a shipment.</p>
         <div id="planned-date-field" style="max-width:300px;margin-top:10px;">
             <label for="planned_completion_date_status">Planned Completion Date <span style="color:#c00">*</span></label>
             <input type="date" id="planned_completion_date_status" name="planned_completion_date" value="{{ batch[8] or '' }}">

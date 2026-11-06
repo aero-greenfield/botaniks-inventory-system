@@ -81,7 +81,8 @@ def create_database():
     
                    product_dimension TEXT,
 
-                   batch_type TEXT DEFAULT 'finished'
+                   batch_type TEXT DEFAULT 'finished',
+                   housemade_material_id INTEGER DEFAULT NULL
 
 
                    )
@@ -95,6 +96,11 @@ def create_database():
     # ADDED: batch-type-on-recipe feature — additive migration for pre-existing SQLite DBs.
     if "batch_type" not in _recipe_cols:
         cursor.execute("ALTER TABLE recipes ADD COLUMN batch_type TEXT DEFAULT 'finished'")
+    # ADDED: edit-path safety fix — the house-made material a mix recipe produces into, so a recipe
+    # rename can't split its component stock across two materials. Existing Postgres deploys:
+    #     ALTER TABLE recipes ADD COLUMN IF NOT EXISTS housemade_material_id INTEGER DEFAULT NULL;
+    if "housemade_material_id" not in _recipe_cols:
+        cursor.execute("ALTER TABLE recipes ADD COLUMN housemade_material_id INTEGER DEFAULT NULL")
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS recipe_materials(
@@ -131,7 +137,12 @@ def create_database():
     CREATE TABLE IF NOT EXISTS batches(
                     batch_id INTEGER PRIMARY KEY,
                     product_name TEXT NOT NULL,
-                    quantity INTEGER,
+                    -- CHANGED: fractional-quantity fix — was INTEGER, the only quantity column
+                    -- in the schema that wasn't NUMERIC/REAL. Postgres ROUNDED a fractional
+                    -- batch quantity on insert (18.75 -> 19) while the mix output lot kept the
+                    -- unrounded value, desyncing the two at creation. SQLite never enforced the
+                    -- affinity, which is why the test suite couldn't reproduce it.
+                    quantity REAL,
                     date_completed TEXT,
                     status TEXT DEFAULT 'Ready',
                     notes TEXT,
@@ -165,6 +176,20 @@ def create_database():
             UPDATE batches SET deduction_mode = 'deferred'
             WHERE status = 'Planned' AND batch_type IN ('finished', 'mix')
         """)
+
+    # ADDED: fractional-quantity fix — batches.quantity changed INTEGER -> REAL/NUMERIC.
+    # No SQLite migration is needed or possible here: SQLite doesn't enforce column affinity
+    # (an INTEGER-declared column already stores 18.75 verbatim), and ALTER TABLE cannot change
+    # a column's type anyway. Only PostgreSQL actually rounded on insert.
+    # EXISTING Postgres deploys must be migrated by hand in the Supabase SQL editor, following
+    # the same convention as deduction_mode above (see init_db.py) — this file only builds
+    # fresh SQLite DBs:
+    #     ALTER TABLE batches ALTER COLUMN quantity TYPE NUMERIC;
+    # Then restore the three rows the INTEGER column had already rounded (the lot is the
+    # authoritative side for these; the batch row is what got corrupted):
+    #     UPDATE batches SET quantity = 37.5  WHERE batch_id = 83;   -- FTCC7513, was 38
+    #     UPDATE batches SET quantity = 18.75 WHERE batch_id = 84;   -- FTCC7512, was 19
+    #     UPDATE batches SET quantity = 18.75 WHERE batch_id = 85;   -- FTCC7510, was 19
 
 
     #Batch_materials

@@ -365,6 +365,31 @@ def test_batches_page_shows_mix_prefix_and_original_total(client, auth, db,
     assert "/ 100" in html                  # Bug 4: 90 remaining / 100 originally produced
 
 
+def test_component_row_shows_kg_not_raw_grams_after_recipe_rename(
+    client, auth, db, make_material, make_lot, make_recipe
+):
+    # renamed-recipe fix, end to end. Reproduces the production incident: a 4 kg Component
+    # (4000 g output lot) whose recipe was later renamed printed a bare "4000" — the unit lookup
+    # went NULL, so the route skipped the gram->kg conversion AND the template dropped the unit
+    # suffix. Note "4000 < 236" was also false, which is why even the "/ total" suffix vanished.
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 10000)
+    make_recipe("KgMix", [{"material_name": "Matcha", "quantity_needed": 1000}],
+                batch_type="mix", product_unit="kg", product_dimension="mass")
+    add_to_batches("KgMix", 4, batch_number="KG9", batch_type="mix",
+                   lot_selections={mid: [{"lot_id": lid, "qty": 4000}]})
+
+    cur = db.cursor()
+    db.execute(cur, "UPDATE recipes SET product_name = %s WHERE product_name = %s",
+               ("KgMix V1", "KgMix"))
+    db.commit()
+
+    html = client.get("/batches", headers=auth).get_data(as_text=True)
+    assert "MIX-BATCH-KG9" in html
+    assert "4000" not in html, "Component row must not print the output lot in raw grams"
+    assert "kg" in html, "the unit suffix must render"
+
+
 # --- planned-deduction-mode feature: planned batches are visible and editable ---------
 def _planned_deferred_batch(make_material, make_lot, make_recipe):
     """A deferred Planned finished batch with one reserved lot. Returns (batch_id, material_id, lot_id)."""
@@ -436,6 +461,52 @@ def test_mark_ready_with_short_stock_keeps_batch_planned_and_flashes(client, aut
     with client.session_transaction() as sess:
         flashes = sess.get("_flashes", [])
     assert any(cat == "error" and "stays Planned" in msg for cat, msg in flashes)
+
+
+# --- quantity-edit-desync fix: reconciliation no longer needs a checkbox ---------------
+def test_quantity_edit_reconciles_stock_without_the_adjust_checkbox(
+    client, auth, make_material, make_lot, make_recipe
+):
+    # THE production gap: raw-material reconciliation used to run only when the form carried
+    # adjust_deductions=1, from a checkbox that is unchecked by default. Posting a changed
+    # quantity WITHOUT it silently left the deductions sized for the old quantity — which is how
+    # all 8 desynced batches happened. Note this POST deliberately omits adjust_deductions.
+    make_material("Matcha")
+    mid = get_material_id("Matcha")
+    lid = make_lot(mid, 1000)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}], batch_type="finished")
+    bid = add_to_batches("Latte", 10, batch_number="QR1",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 100}]})
+    assert get_material_stock_from_lots(mid) == 900
+
+    resp = client.post(f"/edit-batch/{bid}/update-details", headers=auth,
+                       data={"product_name": "Latte", "quantity": "8", "notes": ""})
+
+    assert resp.status_code == 302
+    assert float(get_batch_by_id(bid)[2]) == 8
+    # 20 g returned: the batch now claims 8 units, so it may only hold 80 g of deductions
+    assert get_material_stock_from_lots(mid) == 920
+
+
+def test_quantity_edit_rejected_when_stock_cannot_cover_the_increase(
+    client, auth, make_material, make_lot, make_recipe
+):
+    make_material("Matcha")
+    mid = get_material_id("Matcha")
+    lid = make_lot(mid, 105)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}], batch_type="finished")
+    bid = add_to_batches("Latte", 10, batch_number="QR2",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 100}]})
+    assert get_material_stock_from_lots(mid) == 5
+
+    resp = client.post(f"/edit-batch/{bid}/update-details", headers=auth,
+                       data={"product_name": "Latte", "quantity": "20", "notes": ""})
+
+    assert resp.status_code == 400
+    assert b"Cannot Change Quantity" in resp.data
+    # the whole edit rolled back — quantity and stock both untouched
+    assert float(get_batch_by_id(bid)[2]) == 10
+    assert get_material_stock_from_lots(mid) == 5
 
 
 def test_edit_page_opens_for_deferred_planned_batch(client, auth, make_material, make_lot, make_recipe):
@@ -521,3 +592,93 @@ def test_planned_date_of_tomorrow_does_not_auto_promote(client, auth, freeze_bus
     # and the lot must be untouched — nothing should have been deducted
     cur_db = get_material_stock_from_lots(mid)
     assert cur_db == 100
+
+
+# --- edit-path safety fix: status buttons can no longer skip or repeat stock movements ----
+def _status_flashes(client):
+    with client.session_transaction() as sess:
+        return [msg for cat, msg in sess.get("_flashes", []) if cat == "error"]
+
+
+def test_planned_batch_cannot_be_marked_shipped(client, auth, make_material, make_lot, make_recipe):
+    # Planned -> Shipped only flipped the label: a deferred batch never deducted its materials.
+    make_material("Matcha")
+    mid = get_material_id("Matcha")
+    make_lot(mid, 100)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}], batch_type="finished")
+    bid = add_to_batches("Latte", 1, batch_number="ST1", planned_completion_date="2999-01-01",
+                         batch_type="finished", deduction_mode="deferred", lot_selections=None)
+
+    resp = client.post(f"/edit-batch/{bid}/change-status", headers=auth, data={"status": "Shipped"})
+
+    assert resp.status_code == 302
+    assert get_batch_by_id(bid)[4] == "Planned"
+    assert get_material_stock_from_lots(mid) == 100
+    assert _status_flashes(client)
+
+
+def test_ready_mix_cannot_go_back_to_planned(client, auth, db, make_material, make_lot, make_recipe):
+    # Ready mix -> Planned -> Ready re-ran promotion and created a SECOND output lot (double stock).
+    make_material("Matcha")
+    mid = get_material_id("Matcha")
+    lid = make_lot(mid, 100)
+    make_recipe("Comp", [{"material_name": "Matcha", "quantity_needed": 10}], batch_type="mix")
+    bid = add_to_batches("Comp", 1, batch_number="ST2", batch_type="mix",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 10}]})
+
+    resp = client.post(f"/edit-batch/{bid}/change-status", headers=auth,
+                       data={"status": "Planned", "planned_completion_date": "2999-01-01"})
+
+    assert resp.status_code == 302
+    assert get_batch_by_id(bid)[4] == "Ready"
+    cur = db.cursor()
+    db.execute(cur, "SELECT COUNT(*) FROM raw_material_lots WHERE lot_number LIKE 'MIX-BATCH-%%'")
+    assert cur.fetchone()[0] == 1
+    assert _status_flashes(client)
+
+
+def test_ready_batch_cannot_be_marked_shipped_by_hand(client, auth, make_material, make_lot, make_recipe):
+    # Shipped status is derived from shipments; a hand-set 'Shipped' left the whole batch unallocated.
+    make_material("Matcha")
+    mid = get_material_id("Matcha")
+    lid = make_lot(mid, 100)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}], batch_type="finished")
+    bid = add_to_batches("Latte", 1, batch_number="ST3", batch_type="finished",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 10}]})
+
+    client.post(f"/edit-batch/{bid}/change-status", headers=auth, data={"status": "Shipped"})
+
+    assert get_batch_by_id(bid)[4] == "Ready"
+    assert _status_flashes(client)
+
+
+def test_legacy_mark_shipped_route_is_gone(client, auth, make_material, make_lot, make_recipe):
+    make_material("Matcha")
+    mid = get_material_id("Matcha")
+    lid = make_lot(mid, 100)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}], batch_type="finished")
+    bid = add_to_batches("Latte", 1, batch_number="ST4", batch_type="finished",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 10}]})
+    resp = client.post(f"/batches/{bid}/mark-shipped", headers=auth)
+    assert resp.status_code in (404, 405)
+    assert get_batch_by_id(bid)[4] == "Ready"
+
+
+def test_manual_override_is_entered_in_the_material_display_unit(client, auth, db, make_material, make_lot, make_recipe):
+    # The edit form shows and posts kg for a kg material, but the route passed the number on as
+    # grams: typing "5" set usage to 5 g. It must be converted to base units first.
+    make_material("KgMatcha", unit="kg")
+    mid = get_material_id("KgMatcha")
+    lid = make_lot(mid, 100000)                      # 100 kg, stored in grams
+    make_recipe("Latte", [{"material_name": "KgMatcha", "quantity_needed": 1000}], batch_type="finished")
+    bid = add_to_batches("Latte", 4, batch_number="KG1", batch_type="finished",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 4000}]})
+
+    client.post(f"/edit-batch/{bid}/update-details", headers=auth,
+                data={"product_name": "Latte", "quantity": "4", "adjust_deductions": "1",
+                      f"material_{mid}": "5", "lot_selections_json": ""})
+
+    cur = db.cursor()
+    db.execute(cur, "SELECT quantity_used FROM batch_materials WHERE batch_id = %s", (bid,))
+    assert float(cur.fetchone()[0]) == 5000
+    assert get_material_stock_from_lots(mid) == 95000

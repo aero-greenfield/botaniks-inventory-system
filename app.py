@@ -68,9 +68,14 @@ from services.recipes import (
 )
 from services.batches import (
     add_to_batches, get_batches, get_batches_shipped, get_batches_planned,
-    get_all_batches_with_id, get_batch_by_id, mark_as_shipped, delete_batch,
+    get_all_batches_with_id, get_batch_by_id, delete_batch,
     update_batch, update_batch_status, promote_batch_now, get_batch_materials,
+    # ADDED: edit-path safety fix — manual status changes that would skip/repeat stock movements
+    get_status_change_error, BatchStatusError,
     adjust_batch_material, check_batch_materials_stock,
+    # ADDED: quantity-edit-desync fix — update_batch now reconciles a batch's input deductions
+    #        and mix output lot, and raises this when the edit can't be honoured.
+    BatchReconcileError,
     get_batch_materials_for_reallocation,
     # ADDED: planned-deduction-mode feature — a deferred Planned batch has no batch_materials rows;
     #        its lot picks live in the planned_lot_selections JSON column and are read/written here.
@@ -1298,29 +1303,17 @@ def view_batches():
         back_link=True, back_link_url="/", back_link_label="Back to Home"
 )
 
-# mark as shipped button. 
-@app.route('/batches/<int:batch_id>/mark-shipped', methods=['POST']) # this is a button in batches.html for each batch, it sends a POST request to this route with the batch_id to mark that batch as shipped.
-@requires_auth
-def mark_batch_as_shipped(batch_id):
-    """
-    click button, mark batch as shipped. this is a POST route
-    
-    """
-    result = mark_as_shipped(batch_id) # call function to update batch status in database.
-    if not result:
-        return render_template('error.html',
-            title="Ship Failed",
-            message="Could not mark batch as shipped. The batch may not exist.",
-        ), 500
-    logging.info(f"Batch marked as shipped: batch_id={batch_id}")
-    log_action('batch_shipped', f"batch_id={batch_id}")
-    return redirect(url_for('view_batches')) # after marking as shipped, redirect back to batches page to see updated status.
+# REMOVED: edit-path safety fix — /batches/<id>/mark-shipped flipped a batch to 'Shipped' with no
+#          shipment_batches rows, contradicting the shipment-derived status. No template linked to
+#          it any more; shipping goes through /shipments.
 
 
 @app.route('/batches/<int:batch_id>/materials')
 @requires_auth
 def batch_materials(batch_id):
     """
+    note: also called by get_shipped_batch_materials
+
     shows in details when clicking on detials of batch, 
     when calling function, it returns: material name, quantity, unit, batch material lot id, lot number, and batch id,
     but for batch details, user only sees: material name, quantity used, unit, and lot number. 
@@ -1333,7 +1326,11 @@ def batch_materials(batch_id):
         {"materials": [...], "planned": bool, "fifo": bool}
     planned = these quantities are reservations, not deductions.
     fifo    = deferred batch with no stored picks; the oldest lots get used at the planned date.
-    The three JS callers were updated with it: batches.html, manage_batches.html, edit_batch.html.
+    All five JS callers go through renderBatchMaterials() in static/js/batch_materials.js (loaded
+    globally in base.html), so this shape is unpacked in exactly one place: batches.html,
+    manage_batches.html, edit_batch.html, shipped_batches.html, shipment_detail.html.
+    The shipment-side two were missed when the shape changed and silently rendered "Failed to load
+    materials" until they were migrated too — keep new callers on the shared renderer.
     """
     rows = get_batch_materials(batch_id)
     planned = False
@@ -1353,6 +1350,9 @@ def batch_materials(batch_id):
     #          shows e.g. "1" kg instead of "1000".
     materials = [
         {'material_name': r[0], 'quantity_used': disp(r[1], r[2]), 'unit': r[2], 'batch_material_lot_id': r[3], 'lot_number': r[4], 'material_id': r[5], 'cost_per_unit': r[6],
+         # ADDED: edit-path safety fix — full-precision display-unit value for the edit form's
+         # inputs and maths (quantity_used is a rounded display string).
+         'quantity_used_exact': float(units.from_base(r[1], r[2])) if r[1] is not None else 0.0,
          # planned rows carry an 8th element flagging a lot that has since expired/been used up
          'lot_status': (r[7] if len(r) > 7 else 'active')}
         for r in rows
@@ -1830,14 +1830,35 @@ def update_batch_details(batch_id):
                 back_link=True, back_link_url=f"/edit-batch/{batch_id}", back_link_label="Go back to Edit Batch"
             ), 400
         
+    # CHANGED: quantity-edit-desync fix — this block used to be the ONLY thing that reconciled a
+    # batch's raw-material deductions after a quantity change, and it is gated on a checkbox that
+    # is UNCHECKED by default. Leave it unticked and the deductions were silently never adjusted:
+    # all 8 desynced production batches are exactly that. Reconciliation is now the default,
+    # performed inside update_batch (which also resizes a mix batch's output lot, in the same
+    # transaction). This block is therefore no longer a gate — it only supplies EXPLICIT
+    # per-material overrides when the user chooses to type their own numbers.
     new_quantities = {}
     lot_selections = {}
     if request.form.get('adjust_deductions') == '1':
+        # CHANGED: edit-path safety fix — the form shows and posts each material's TOTAL in its
+        # display unit (kg, lb), but this used to pass the number on as base units: "5" for a kg
+        # material became 5 g. Convert to base, and skip materials the user left unchanged (the
+        # form pre-fills values rounded to 4 dp, which would otherwise read as a tiny edit).
+        current = {}  # material_id -> (unit, total used in base units)
+        for r in get_batch_materials(batch_id) or []:
+            unit, used = current.get(r[5], (r[2], 0.0))
+            current[r[5]] = (unit, used + float(r[1] or 0))
         for key, value in request.form.items():
             if key.startswith('material_'):
                 try:
                     material_id = int(key[len('material_'):])
-                    new_quantities[material_id] = float(value)
+                    if material_id not in current:
+                        continue
+                    unit, used_base = current[material_id]
+                    posted = float(value)
+                    if abs(posted - round(float(units.from_base(used_base, unit)), 4)) < 1e-9:
+                        continue
+                    new_quantities[material_id] = float(units.to_base(posted, unit))
                 except (ValueError, TypeError):
                     pass
 
@@ -1868,7 +1889,25 @@ def update_batch_details(batch_id):
         and quantity is not None and float(existing[2]) != quantity
     )
 
-    result = update_batch(batch_id, product_name=product_name, quantity=quantity, notes=notes, expiration_date=expiration_date, planned_completion_date=planned_completion_date)
+    # CHANGED: quantity-edit-desync fix — the deduction adjustment used to run AFTER this call, in
+    # its own transaction (adjust_batch_material), so a failure there left the batch row already
+    # committed with its stock unreconciled. Both now happen inside update_batch, atomically.
+    try:
+        result = update_batch(
+            batch_id, product_name=product_name, quantity=quantity, notes=notes,
+            expiration_date=expiration_date, planned_completion_date=planned_completion_date,
+            material_adjustments=new_quantities or None,
+            lot_selections=lot_selections or None,
+        )
+    except BatchReconcileError as e:
+        # The edit can't be honoured — not enough stock to cover an increase, or the new quantity
+        # is below what has already been consumed from the batch's component lot. This message is
+        # built from quantities, not exception internals, so it is safe to show (see CLAUDE.md).
+        return render_template('error.html',
+            title="Cannot Change Quantity",
+            message=str(e),
+            back_link=True, back_link_url=f"/edit-batch/{batch_id}", back_link_label="Go back to Edit Batch"
+        ), 400
 
     if result:
         logging.info(f"Batch details updated: batch_id={batch_id}, product_name={product_name}, quantity={quantity}")
@@ -1880,17 +1919,13 @@ def update_batch_details(batch_id):
             flash('Quantity changed — lot selections were cleared. Re-select lots, or the oldest lots (FIFO) will be used at the planned date.', 'warning')
 
         if new_quantities:
-            adj_result = adjust_batch_material(batch_id, new_quantities, lot_selections or None)
-            if adj_result:
-                log_action('batch_materials_adjusted', f"batch_id={batch_id}, adjustments={new_quantities}")
-                # CHANGED: was url_for(..., msg=...) — moved to flash()
-                flash('Batch details and material deductions updated successfully', 'success')
-                return redirect(url_for('edit_batch', batch_id=batch_id))
-            else:
-                flash('Batch details saved but failed to adjust material deductions — insufficient stock or material not found', 'error')
-                return redirect(url_for('edit_batch', batch_id=batch_id))
-
-        flash('Batch details updated successfully', 'success')
+            log_action('batch_materials_adjusted', f"batch_id={batch_id}, adjustments={new_quantities}")
+            flash('Batch details and material deductions updated successfully', 'success')
+        elif quantity is not None:
+            log_action('batch_materials_reconciled', f"batch_id={batch_id}, quantity={quantity}, mode=proportional")
+            flash('Batch details updated — raw material deductions were adjusted to match the new quantity', 'success')
+        else:
+            flash('Batch details updated successfully', 'success')
         return redirect(url_for('edit_batch', batch_id=batch_id))
     else:
         flash('Failed to update batch details', 'error')
@@ -1954,7 +1989,15 @@ def change_batch_status(batch_id):
 
     new_status = request.form.get('status') # Get the new status from the form submission (e.g., "ready", "shipped", etc.)
 
-    
+    # ADDED: edit-path safety fix — check the transition BEFORE writing anything. The Planned branch
+    # below saves a planned_completion_date first, so a refused change must not get that far.
+    status_error = get_status_change_error(batch_id, new_status)
+    if status_error:
+        flash(status_error, 'error')
+        if request.form.get('next') == 'batches':
+            return redirect(url_for('view_batches'))
+        return redirect(url_for('edit_batch', batch_id=batch_id))
+
     if new_status == 'Planned': 
         planned_completion_date = request.form.get('planned_completion_date', '').strip() or None #get planned date of completion
         if not planned_completion_date:
@@ -1986,7 +2029,12 @@ def change_batch_status(batch_id):
                 return redirect(url_for('view_batches'))
             return redirect(url_for('edit_batch', batch_id=batch_id))
     else:
-        result = update_batch_status(batch_id, new_status)
+        try:
+            result = update_batch_status(batch_id, new_status)
+        except BatchStatusError as e:
+            # re-checked inside the write transaction; the message is user-facing (no internals)
+            flash(str(e), 'error')
+            return redirect(url_for('edit_batch', batch_id=batch_id))
     if result:
         logging.info(f"Batch status changed: batch_id={batch_id}, new_status={new_status}")
         log_action('batch_status_changed', f"batch_id={batch_id}, new_status={new_status}")
