@@ -1282,22 +1282,20 @@ def test_raising_a_fully_shipped_batch_reopens_it(make_material, make_lot, make_
     assert _batch_status(db, bid)[0] == "Partially Shipped"
 
 
-def test_manual_override_rejected_for_material_drawn_from_two_lots(make_material, make_lot, make_recipe, db):
-    # _apply_material_adjustments is keyed on material_id: it moved stock for ONE lot row but then
-    # wrote the new total onto EVERY row of that material, double-counting usage. Refuse instead.
+def test_manual_override_on_split_material_shrinks_every_lot_row(make_material, make_lot, make_recipe, db):
+    # _apply_material_adjustments used to move stock for ONE lot row and then write the new total
+    # onto EVERY row of the material. A per-material total now shrinks each row in proportion and
+    # returns each share to its own lot.
     mid = make_material("Matcha")
     lid1 = make_lot(mid, 15)
     lid2 = make_lot(mid, 100)
     make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}])
     bid = add_to_batches("Latte", 2, batch_number="ML1",
                          lot_selections={mid: [{"lot_id": lid1, "qty": 15}, {"lot_id": lid2, "qty": 5}]})
-    with pytest.raises(BatchReconcileError):
-        update_batch(bid, notes="x", material_adjustments={mid: 10})
-    cur = db.cursor()
-    db.execute(cur, "SELECT lot_id, quantity_used FROM batch_materials WHERE batch_id = %s ORDER BY lot_id", (bid,))
-    assert [(r[0], float(r[1])) for r in cur.fetchall()] == [(lid1, 15.0), (lid2, 5.0)]
-    assert float(_lot_qty(db, lid1)[0]) == 0           # nothing returned to either lot
-    assert float(_lot_qty(db, lid2)[0]) == 95
+    assert update_batch(bid, notes="x", material_adjustments={mid: 10}) is True
+    assert _bm_rows(db, bid) == [(mid, lid1, 7.5), (mid, lid2, 2.5)]
+    assert float(_lot_qty(db, lid1)[0]) == 7.5
+    assert float(_lot_qty(db, lid2)[0]) == 97.5
 
 
 def test_manual_override_still_works_for_single_lot_material(make_material, make_lot, make_recipe, db):
@@ -1372,3 +1370,93 @@ def test_existing_mix_output_material_without_flag_is_still_reused(make_material
     cur = db.cursor()
     db.execute(cur, "SELECT material_id FROM raw_material_lots WHERE lot_number = %s", ("MIX-BATCH-L1",))
     assert cur.fetchone()[0] == legacy
+
+
+# --- edits can draw from ANY usable lot of the ingredient, not just the original one ------------
+def test_raising_quantity_uses_other_lot_when_original_is_empty(make_material, make_lot, make_recipe, db):
+    # The reported case: Latte drew Matcha from lot 1 (50) and lot 2; another batch then drained
+    # lot 1. Raising Latte was refused because each row could only grow from its own lot.
+    mid = make_material("Matcha")
+    lot1 = make_lot(mid, 50)
+    lot2 = make_lot(mid, 1000)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}])
+    make_recipe("Other", [{"material_name": "Matcha", "quantity_needed": 10}])
+    bid = add_to_batches("Latte", 10, batch_number="RQ1",
+                         lot_selections={mid: [{"lot_id": lot1, "qty": 40}, {"lot_id": lot2, "qty": 60}]})
+    add_to_batches("Other", 1, batch_number="RQ2", lot_selections={mid: [{"lot_id": lot1, "qty": 10}]})
+    assert float(_lot_qty(db, lot1)[0]) == 0
+
+    assert update_batch(bid, quantity=12) is True
+
+    rows = _bm_rows(db, bid)
+    assert sum(q for _, _, q in rows) == 120
+    assert float(_lot_qty(db, lot2)[0]) == 1000 - 60 - 20
+
+
+def test_raising_single_lot_batch_adds_a_row_for_the_next_lot(make_material, make_lot, make_recipe, db):
+    mid = make_material("Matcha")
+    lot1 = make_lot(mid, 100, received_date="2024-01-01")
+    lot2 = make_lot(mid, 500, received_date="2024-02-01")
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}])
+    bid = add_to_batches("Latte", 10, batch_number="RQ3", lot_selections={mid: [{"lot_id": lot1, "qty": 100}]})
+
+    assert update_batch(bid, quantity=15) is True
+
+    assert _bm_rows(db, bid) == [(mid, lot1, 100.0), (mid, lot2, 50.0)]
+    assert float(_lot_qty(db, lot2)[0]) == 450
+
+
+def test_extra_stock_skips_expired_lots_and_takes_oldest_usable(make_material, make_lot, make_recipe, db):
+    mid = make_material("Matcha")
+    lot1 = make_lot(mid, 100, received_date="2024-01-01")
+    expired = make_lot(mid, 500, received_date="2024-01-15", expiry_date="2020-01-01")
+    older = make_lot(mid, 30, received_date="2024-02-01")
+    newer = make_lot(mid, 500, received_date="2024-03-01")
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}])
+    bid = add_to_batches("Latte", 10, batch_number="RQ4", lot_selections={mid: [{"lot_id": lot1, "qty": 100}]})
+
+    assert update_batch(bid, quantity=15) is True    # needs 50 more; lot1 is empty
+
+    assert float(_lot_qty(db, expired)[0]) == 500    # untouched
+    assert float(_lot_qty(db, older)[0]) == 0        # oldest usable drained first
+    assert float(_lot_qty(db, newer)[0]) == 480
+
+
+def test_not_enough_across_all_lots_changes_nothing(make_material, make_lot, make_recipe, db):
+    mid = make_material("Matcha")
+    lot1 = make_lot(mid, 100)
+    lot2 = make_lot(mid, 20)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}])
+    bid = add_to_batches("Latte", 10, batch_number="RQ5", lot_selections={mid: [{"lot_id": lot1, "qty": 100}]})
+
+    with pytest.raises(BatchReconcileError):
+        update_batch(bid, quantity=15)               # needs 50, only 20 exists
+
+    assert float(get_batch_by_id(bid)[2]) == 10
+    assert _bm_rows(db, bid) == [(mid, lot1, 100.0)]
+    assert float(_lot_qty(db, lot2)[0]) == 20
+
+
+def test_override_uses_the_lot_the_user_picked_first(make_material, make_lot, make_recipe, db):
+    mid = make_material("Matcha")
+    lot1 = make_lot(mid, 200, received_date="2024-01-01")
+    picked = make_lot(mid, 200, received_date="2024-06-01")
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}])
+    bid = add_to_batches("Latte", 1, batch_number="RQ6", lot_selections={mid: [{"lot_id": lot1, "qty": 10}]})
+
+    assert update_batch(bid, notes="x", material_adjustments={mid: 40},
+                        lot_selections={mid: picked}) is True
+
+    assert _bm_rows(db, bid) == [(mid, lot1, 10.0), (mid, picked, 30.0)]
+    assert float(_lot_qty(db, lot1)[0]) == 190
+    assert float(_lot_qty(db, picked)[0]) == 170
+
+
+def test_stock_precheck_agrees_with_fallback_lots(make_material, make_lot, make_recipe):
+    mid = make_material("Matcha")
+    lot1 = make_lot(mid, 10)
+    make_lot(mid, 100)
+    make_recipe("Latte", [{"material_name": "Matcha", "quantity_needed": 10}])
+    bid = add_to_batches("Latte", 1, batch_number="RQ7", lot_selections={mid: [{"lot_id": lot1, "qty": 10}]})
+    assert check_batch_materials_stock(bid, {mid: 60}) is True     # lot1 empty, other lot covers
+    assert check_batch_materials_stock(bid, {mid: 500}) is False

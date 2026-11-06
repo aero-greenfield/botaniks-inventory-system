@@ -662,3 +662,23 @@ def test_legacy_mark_shipped_route_is_gone(client, auth, make_material, make_lot
     resp = client.post(f"/batches/{bid}/mark-shipped", headers=auth)
     assert resp.status_code in (404, 405)
     assert get_batch_by_id(bid)[4] == "Ready"
+
+
+def test_manual_override_is_entered_in_the_material_display_unit(client, auth, db, make_material, make_lot, make_recipe):
+    # The edit form shows and posts kg for a kg material, but the route passed the number on as
+    # grams: typing "5" set usage to 5 g. It must be converted to base units first.
+    make_material("KgMatcha", unit="kg")
+    mid = get_material_id("KgMatcha")
+    lid = make_lot(mid, 100000)                      # 100 kg, stored in grams
+    make_recipe("Latte", [{"material_name": "KgMatcha", "quantity_needed": 1000}], batch_type="finished")
+    bid = add_to_batches("Latte", 4, batch_number="KG1", batch_type="finished",
+                         lot_selections={mid: [{"lot_id": lid, "qty": 4000}]})
+
+    client.post(f"/edit-batch/{bid}/update-details", headers=auth,
+                data={"product_name": "Latte", "quantity": "4", "adjust_deductions": "1",
+                      f"material_{mid}": "5", "lot_selections_json": ""})
+
+    cur = db.cursor()
+    db.execute(cur, "SELECT quantity_used FROM batch_materials WHERE batch_id = %s", (bid,))
+    assert float(cur.fetchone()[0]) == 5000
+    assert get_material_stock_from_lots(mid) == 95000

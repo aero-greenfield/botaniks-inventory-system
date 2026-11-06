@@ -121,7 +121,23 @@
         .then(function(payload) {
             var data = (payload && payload.materials) || [];
             if (isDeferredPlanned || !data.length) return;
-            materials = data;
+            // CHANGED: edit-path safety fix — one row per INGREDIENT. An ingredient taken from two
+            // lots used to render two inputs with the same name, and only the first was submitted.
+            // quantity_used is the exact total in the display unit (the rounded string is display-only).
+            var byMaterial = {};
+            data.forEach(function(m) {
+                var g = byMaterial[m.material_id];
+                if (!g) {
+                    g = byMaterial[m.material_id] = {
+                        material_id: m.material_id, material_name: m.material_name, unit: m.unit,
+                        quantity_used: 0, lots: []
+                    };
+                    materials.push(g);
+                }
+                g.quantity_used += m.quantity_used_exact;
+                if (m.lot_number) g.lots.push(m.lot_number);
+            });
+            data = materials;
             var fetches = data.map(function(m) {
                 return fetch('/api/available-lots/' + m.material_id)
                     .then(function(r) { return r.json(); })
@@ -147,22 +163,15 @@
             var lots = availableLots[m.material_id] || [];
             var lotCell;
             if (isIncreasing) {
-                var opts = lots.map(function(l) {
-                    return '<option value="' + l.lot_id + '">Lot ' + l.lot_number + ' (' + l.quantity + ' avail)</option>';
-                }).join('');
-                if (!opts) {
-                    lotCell = '<span style="color:var(--danger);font-size:12px;">No lots available</span>';
-                } else {
-                    lotCell = '<select id="lot-select-' + i + '" data-material-id="' + m.material_id + '" style="font-size:12px;max-width:200px;">' + opts + '</select>';
-                }
+                lotCell = lotSelectHtml(i, m, lots, '');
             } else {
-                lotCell = '<span style="color:var(--text-muted);font-size:12px;">— original lot</span>';
+                lotCell = originalLotsHtml(m);
             }
 
             var tr = document.createElement('tr');
             tr.innerHTML =
                 '<td style="padding:4px 8px;">' + m.material_name + '</td>' +
-                '<td style="text-align:right;padding:4px 8px;">' + m.quantity_used + '</td>' +
+                '<td style="text-align:right;padding:4px 8px;">' + (Math.round(m.quantity_used * 10000) / 10000) + '</td>' +
                 '<td style="text-align:right;padding:4px 8px;">' +
                     '<input type="number" step="any" min="0" name="material_' + m.material_id + '" ' +
                     'value="' + newVal + '" ' +
@@ -197,18 +206,29 @@
         if (isIncreasing) {
             // Preserve current selection if possible
             var currentSel = (cell.querySelector('select') || {}).value;
-            var opts = lots.map(function(l) {
-                var sel = String(l.lot_id) === String(currentSel) ? ' selected' : '';
-                return '<option value="' + l.lot_id + '"' + sel + '>Lot ' + l.lot_number + ' (' + l.quantity + ' avail)</option>';
-            }).join('');
-            if (!opts) {
-                cell.innerHTML = '<span style="color:var(--danger);font-size:12px;">No lots available</span>';
-            } else {
-                cell.innerHTML = '<select id="lot-select-' + i + '" data-material-id="' + m.material_id + '" style="font-size:12px;max-width:200px;">' + opts + '</select>';
-            }
+            cell.innerHTML = lotSelectHtml(i, m, lots, currentSel);
         } else {
-            cell.innerHTML = '<span style="color:var(--text-muted);font-size:12px;">— original lot</span>';
+            cell.innerHTML = originalLotsHtml(m);
         }
+    }
+
+    // ADDED: edit-path safety fix — "Auto" (the default) lets the server draw the extra amount from
+    // the batch's own lots first, then the oldest usable lots; picking a lot only makes it go first.
+    function lotSelectHtml(i, m, lots, currentSel) {
+        if (!lots.length) {
+            return '<span style="color:var(--danger);font-size:12px;">No lots available</span>';
+        }
+        var opts = '<option value="">Auto (oldest first)</option>' + lots.map(function(l) {
+            var sel = String(l.lot_id) === String(currentSel) ? ' selected' : '';
+            return '<option value="' + l.lot_id + '"' + sel + '>Lot ' + l.lot_number + ' (' + l.quantity + ' avail)</option>';
+        }).join('');
+        return '<select id="lot-select-' + i + '" data-material-id="' + m.material_id + '" style="font-size:12px;max-width:200px;">' + opts + '</select>';
+    }
+
+    function originalLotsHtml(m) {
+        var label = m.lots.length > 1 ? 'original lots: ' : 'original lot';
+        var names = m.lots.length > 1 ? m.lots.join(', ') : '';
+        return '<span style="color:var(--text-muted);font-size:12px;">— ' + label + names + '</span>';
     }
 
     function getProportionalValues() {
@@ -258,9 +278,9 @@
             return;
         }
 
-        // Collect lot selections for materials with positive delta
+        // Collect lot selections for materials with positive delta. CHANGED: edit-path safety fix —
+        // a specific lot is optional now ("Auto" = server picks), so no blocking alert.
         var selections = {};
-        var missingLot = false;
         materials.forEach(function(m, i) {
             var inp = document.getElementById('mat-input-' + i);
             var newVal = parseFloat((inp || {}).value) || 0;
@@ -268,17 +288,9 @@
                 var sel = document.getElementById('lot-select-' + i);
                 if (sel && sel.value) {
                     selections[m.material_id] = parseInt(sel.value);
-                } else {
-                    missingLot = true;
                 }
             }
         });
-
-        if (missingLot) {
-            e.preventDefault();
-            alert('Please select a lot for each material whose quantity is increasing.');
-            return;
-        }
 
         lotSelectionsInput.value = JSON.stringify(selections);
     });

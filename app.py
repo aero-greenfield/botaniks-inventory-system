@@ -1350,6 +1350,9 @@ def batch_materials(batch_id):
     #          shows e.g. "1" kg instead of "1000".
     materials = [
         {'material_name': r[0], 'quantity_used': disp(r[1], r[2]), 'unit': r[2], 'batch_material_lot_id': r[3], 'lot_number': r[4], 'material_id': r[5], 'cost_per_unit': r[6],
+         # ADDED: edit-path safety fix — full-precision display-unit value for the edit form's
+         # inputs and maths (quantity_used is a rounded display string).
+         'quantity_used_exact': float(units.from_base(r[1], r[2])) if r[1] is not None else 0.0,
          # planned rows carry an 8th element flagging a lot that has since expired/been used up
          'lot_status': (r[7] if len(r) > 7 else 'active')}
         for r in rows
@@ -1837,11 +1840,25 @@ def update_batch_details(batch_id):
     new_quantities = {}
     lot_selections = {}
     if request.form.get('adjust_deductions') == '1':
+        # CHANGED: edit-path safety fix — the form shows and posts each material's TOTAL in its
+        # display unit (kg, lb), but this used to pass the number on as base units: "5" for a kg
+        # material became 5 g. Convert to base, and skip materials the user left unchanged (the
+        # form pre-fills values rounded to 4 dp, which would otherwise read as a tiny edit).
+        current = {}  # material_id -> (unit, total used in base units)
+        for r in get_batch_materials(batch_id) or []:
+            unit, used = current.get(r[5], (r[2], 0.0))
+            current[r[5]] = (unit, used + float(r[1] or 0))
         for key, value in request.form.items():
             if key.startswith('material_'):
                 try:
                     material_id = int(key[len('material_'):])
-                    new_quantities[material_id] = float(value)
+                    if material_id not in current:
+                        continue
+                    unit, used_base = current[material_id]
+                    posted = float(value)
+                    if abs(posted - round(float(units.from_base(used_base, unit)), 4)) < 1e-9:
+                        continue
+                    new_quantities[material_id] = float(units.to_base(posted, unit))
                 except (ValueError, TypeError):
                     pass
 
