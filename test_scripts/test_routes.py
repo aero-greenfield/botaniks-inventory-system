@@ -682,3 +682,100 @@ def test_manual_override_is_entered_in_the_material_display_unit(client, auth, d
     db.execute(cur, "SELECT quantity_used FROM batch_materials WHERE batch_id = %s", (bid,))
     assert float(cur.fetchone()[0]) == 5000
     assert get_material_stock_from_lots(mid) == 95000
+
+
+# lot-edit-safety: the Edit Lot form (quantity entered in the display unit, kg here).
+
+def _edit_lot_form(**over):
+    data = {"lot_number": "L1", "quantity": "100.0", "original_quantity": "100.0",
+            "expiration_date": "", "location": "", "supplier": "", "cost_per_unit": "",
+            "adjust_reason": "", "adjust_note": ""}
+    data.update(over)
+    return data
+
+
+def _lot_row(db, lot_id):
+    cur = db.cursor()
+    db.execute(cur, "SELECT quantity, status, location FROM raw_material_lots WHERE lot_id = %s", (lot_id,))
+    return cur.fetchone()
+
+
+def _audit_details(db, action):
+    cur = db.cursor()
+    db.execute(cur, "SELECT details FROM audit_log WHERE action = %s", (action,))
+    return [r[0] for r in cur.fetchall()]
+
+
+def test_edit_lot_untouched_quantity_does_not_overwrite_deduction(client, auth, make_material, make_lot, db):
+    mid = make_material("Matcha", unit="kg")
+    lid = make_lot(mid, 100000, lot_number="L1")
+    cur = db.cursor()
+    # a batch uses 20 kg while the page (showing 100) is still open
+    db.execute(cur, "UPDATE raw_material_lots SET quantity = 80000 WHERE lot_id = %s", (lid,))
+    db.commit()
+    resp = client.post(f"/edit-lot/{lid}/update", data=_edit_lot_form(location="Fern"), headers=auth)
+    assert resp.status_code == 302
+    qty, status, location = _lot_row(db, lid)
+    assert qty == 80000
+    assert location == "Fern"
+    assert _audit_details(db, "lot_quantity_adjusted") == []
+
+
+def test_edit_lot_zero_marks_inactive_and_logs_reason(client, auth, make_material, make_lot, db):
+    mid = make_material("Matcha", unit="kg")
+    lid = make_lot(mid, 100000, lot_number="L1")
+    resp = client.post(f"/edit-lot/{lid}/update",
+                       data=_edit_lot_form(quantity="0", adjust_reason="count_correction"), headers=auth)
+    assert resp.status_code == 302
+    qty, status, _ = _lot_row(db, lid)
+    assert qty == 0 and status == "inactive"
+    (details,) = _audit_details(db, "lot_quantity_adjusted")
+    assert "100 kg -> 0 kg" in details
+    assert "reason=Count correction" in details
+
+
+def test_edit_lot_negative_quantity_400(client, auth, make_material, make_lot, db):
+    mid = make_material("Matcha", unit="kg")
+    lid = make_lot(mid, 100000, lot_number="L1")
+    resp = client.post(f"/edit-lot/{lid}/update",
+                       data=_edit_lot_form(quantity="-1", adjust_reason="count_correction"), headers=auth)
+    assert resp.status_code == 400
+    assert _lot_row(db, lid)[0] == 100000
+
+
+def test_edit_lot_quantity_change_requires_reason(client, auth, make_material, make_lot, db):
+    mid = make_material("Matcha", unit="kg")
+    lid = make_lot(mid, 100000, lot_number="L1")
+    resp = client.post(f"/edit-lot/{lid}/update", data=_edit_lot_form(quantity="90"), headers=auth)
+    assert resp.status_code == 400
+    resp = client.post(f"/edit-lot/{lid}/update",
+                       data=_edit_lot_form(quantity="90", adjust_reason="other"), headers=auth)
+    assert resp.status_code == 400  # "Other" also needs a note
+    assert _lot_row(db, lid)[0] == 100000
+
+
+def test_edit_lot_stale_quantity_change_refused(client, auth, make_material, make_lot, db):
+    mid = make_material("Matcha", unit="kg")
+    lid = make_lot(mid, 100000, lot_number="L1")
+    cur = db.cursor()
+    db.execute(cur, "UPDATE raw_material_lots SET quantity = 80000 WHERE lot_id = %s", (lid,))
+    db.commit()
+    resp = client.post(f"/edit-lot/{lid}/update",
+                       data=_edit_lot_form(quantity="95", adjust_reason="count_correction"), headers=auth)
+    assert resp.status_code == 302
+    assert _lot_row(db, lid)[0] == 80000
+    assert _audit_details(db, "lot_quantity_adjusted") == []
+
+
+def test_edit_lot_refill_reactivates(client, auth, make_material, make_lot, db):
+    mid = make_material("Matcha", unit="kg")
+    lid = make_lot(mid, 100000, lot_number="L1")
+    cur = db.cursor()
+    # a batch used it all: the deduction path leaves it at 0 and 'inactive'
+    db.execute(cur, "UPDATE raw_material_lots SET quantity = 0, status = 'inactive' WHERE lot_id = %s", (lid,))
+    db.commit()
+    client.post(f"/edit-lot/{lid}/update",
+                data=_edit_lot_form(quantity="12.5", original_quantity="0.0",
+                                    adjust_reason="data_entry_fix"), headers=auth)
+    qty, status, _ = _lot_row(db, lid)
+    assert qty == 12500 and status == "active"

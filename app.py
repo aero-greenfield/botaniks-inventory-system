@@ -56,6 +56,7 @@ from services.lots import (
     get_lot_by_id,
     receive_lot as inventory_receive_lot,
     update_lot,
+    LotChangedError,
     delete_lot,
     get_batches_for_lot,
     # ADDED: table-redesign feature — bulk active-lots fetch for the inventory drawers.
@@ -2736,6 +2737,16 @@ def manage_lots():
 
 
 
+# ADDED: lot-edit-safety — why a lot's quantity was changed by hand. Required on the Edit Lot
+#        page whenever the quantity changes, and written to the audit log with old -> new.
+LOT_ADJUST_REASONS = {
+    'count_correction': 'Count correction',
+    'spill_damage': 'Spill / damage',
+    'data_entry_fix': 'Data-entry fix',
+    'other': 'Other',
+}
+
+
 @app.route('/edit-lot/<int:lot_id>') # dynamic URL for editing a specific lot, identified by lot_id. (view only)
 @requires_auth
 def edit_lot(lot_id):
@@ -2780,6 +2791,7 @@ def edit_lot(lot_id):
     return render_template("edit_lot.html",
         lot=lot,
         lot_batches=lot_batches,
+        adjust_reasons=LOT_ADJUST_REASONS,
         back_link=True,
         back_link_url="/manage-lots",
         back_link_label="Back to Manage Lots"
@@ -2821,6 +2833,17 @@ def update_lot_route(lot_id):
         quantity_str = request.form.get('quantity', '').strip()
         quantity = float(quantity_str) if quantity_str else None
 
+        # ADDED: lot-edit-safety — the quantity the page showed when it was opened. If the box
+        # still holds that value the user didn't touch it, so don't write the quantity at all.
+        original_str = request.form.get('original_quantity', '').strip()
+        original_quantity = float(original_str) if original_str else None
+        if (quantity is not None and original_quantity is not None
+                and math.isclose(quantity, original_quantity, rel_tol=1e-9, abs_tol=1e-9)):
+            quantity = None
+
+        adjust_reason = request.form.get('adjust_reason', '').strip()
+        adjust_note = request.form.get('adjust_note', '').strip()
+
         expiration_date_raw = request.form.get('expiration_date')
         expiration_date = expiration_date_raw.strip() if expiration_date_raw else None
 
@@ -2839,13 +2862,31 @@ def update_lot_route(lot_id):
             quantity = None
 
         #validate float inputs
-        if quantity is not None and quantity <= 0:
+        # CHANGED: lot-edit-safety — 0 is allowed now (it marks the lot empty/inactive); only
+        #          negatives are rejected. Before, staff typed tiny leftovers like 0.01 instead.
+        if quantity is not None and quantity < 0:
             return render_template('error.html',
                 title="Invalid Input",
-                message="Quantity must be greater than zero.",
+                message="Quantity cannot be negative.",
                 back_link=True, back_link_url=f"/edit-lot/{lot_id}", back_link_label="Go back to Edit Lot"
             ), 400
-        
+
+        # ADDED: lot-edit-safety — a hand change to stock needs a reason, so the audit log can
+        #        tell a shelf count correction from a typo later.
+        if quantity is not None:
+            if adjust_reason not in LOT_ADJUST_REASONS:
+                return render_template('error.html',
+                    title="Reason Needed",
+                    message="You changed the quantity. Please pick a reason for the change.",
+                    back_link=True, back_link_url=f"/edit-lot/{lot_id}", back_link_label="Go back to Edit Lot"
+                ), 400
+            if adjust_reason == 'other' and not adjust_note:
+                return render_template('error.html',
+                    title="Reason Needed",
+                    message="You picked \"Other\" as the reason. Please add a short note explaining the change.",
+                    back_link=True, back_link_url=f"/edit-lot/{lot_id}", back_link_label="Go back to Edit Lot"
+                ), 400
+
         if cost_per_unit is not None and cost_per_unit < 0:
             return render_template('error.html',
                 title="Invalid Input",
@@ -2868,20 +2909,35 @@ def update_lot_route(lot_id):
         #        material's display unit; store them in the base unit (grams for mass).
         #        quantity -> to_base; cost-per-display-unit -> cost-per-gram via from_base.
         lot_unit = lot_df['unit'].iloc[0]
+        quantity_display = quantity  # kept in the display unit for the audit log
+        expected_quantity = None
         if quantity is not None:
             quantity = float(units.to_base(quantity, lot_unit))
+            if original_quantity is not None:
+                expected_quantity = float(units.to_base(original_quantity, lot_unit))
         if cost_per_unit is not None:
             cost_per_unit = float(units.from_base(cost_per_unit, lot_unit))
 
-        result = update_lot(lot_id, lot_number=lot_number, quantity=quantity, expiration_date=expiration_date, location=location, cost_per_unit=cost_per_unit, supplier=supplier)
-
-        
-        
+        try:
+            result = update_lot(lot_id, lot_number=lot_number, quantity=quantity, expiration_date=expiration_date, location=location, cost_per_unit=cost_per_unit, supplier=supplier, expected_quantity=expected_quantity)
+        except LotChangedError as e:
+            logging.warning(f"update_lot_route: {e}")
+            flash('Nothing was saved: this lot\'s quantity changed since you opened the page '
+                  '(a batch probably used some). The page now shows the current amount — '
+                  'please make your change again.', 'error')
+            return redirect(url_for('edit_lot', lot_id=lot_id))
 
 
         if result:
             logging.info(f"Lot updated: lot_id={lot_id}, lot_number={lot_number}, quantity={quantity}")
             log_action('lot_updated', f"lot_id={lot_id}, lot_number={lot_number}, quantity={quantity}")
+            if quantity is not None:
+                note = f", note={adjust_note}" if adjust_note else ""
+                old_display = float(units.from_base(lot_df['quantity'].iloc[0], lot_unit))
+                log_action('lot_quantity_adjusted',
+                           f"lot_id={lot_id}, lot_number={lot_df['lot_number'].iloc[0]}, "
+                           f"{old_display:g} {lot_unit} -> {quantity_display:g} {lot_unit}, "
+                           f"reason={LOT_ADJUST_REASONS[adjust_reason]}{note}")
             # CHANGED: was url_for(..., msg=...) — moved to flash()
             flash('Lot details updated successfully', 'success')
             return redirect(url_for('edit_lot', lot_id=lot_id))

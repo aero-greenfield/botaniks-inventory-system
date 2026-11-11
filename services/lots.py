@@ -17,6 +17,12 @@ _LOT_UPDATABLE_COLS = frozenset({"lot_number", "quantity", "received_date", "exp
 LOT_EXHAUST_THRESHOLD = 0.01
 
 
+class LotChangedError(Exception):
+    """The lot's quantity changed (e.g. a batch drew from it) after the edit page was opened.
+    Deliberately NOT a ValueError, so update_lot doesn't swallow it into a plain False — the
+    route needs to tell the user to reload instead of showing a generic failure."""
+
+
 def exhaust_lot_if_depleted(db, cursor, lot_id, threshold=LOT_EXHAUST_THRESHOLD):
     """After a deduction, zero out and deactivate a lot whose remaining quantity is a negligible
     residual, so it no longer shows as available stock. Uses `< threshold` so it also catches
@@ -426,18 +432,22 @@ def get_lot_by_id(lot_id):
         db.close()
 
 
-def update_lot(lot_id, lot_number=None, quantity=None, received_date=None, expiration_date=None, location=None, supplier=None, cost_per_unit=None, status=None, is_housemade=None):
+def update_lot(lot_id, lot_number=None, quantity=None, received_date=None, expiration_date=None, location=None, supplier=None, cost_per_unit=None, status=None, is_housemade=None, expected_quantity=None):
     """
-    
-    lets user update any lot information. 
+
+    lets user update any lot information.
 
 
-    If is_housemade is True 
+    If is_housemade is True
     (or lot_number starts with MIX-BATCH-), skip updating quantity (guard in service layer).
 
+    When quantity is set, status follows it: 0 -> 'inactive', above 0 -> 'active' (so a refilled
+    lot shows up for batches again). expected_quantity is the quantity the user saw when they
+    opened the edit page; if the lot no longer holds that amount, raises LotChangedError instead
+    of overwriting a deduction made in the meantime.
 
     returns True if successful, False otherwise.
-    
+
     """
 
     db = get_db_connection()
@@ -473,6 +483,11 @@ def update_lot(lot_id, lot_number=None, quantity=None, received_date=None, expir
         logging.warning(f"Attempted to update quantity for housemade lot {lot_id}. This is not allowed. Quantity will not be updated.")
         del field['quantity']
 
+    # ADDED: lot-edit-safety — status follows quantity. Before, an exhausted lot stayed 'inactive'
+    # after being refilled here, so it held stock that batches could never draw from.
+    if 'quantity' in field:
+        field['status'] = 'active' if field['quantity'] >= LOT_EXHAUST_THRESHOLD else 'inactive'
+
     invalid = set(field) - _LOT_UPDATABLE_COLS
     if invalid:
         raise ValueError(f"Invalid column name(s): {invalid}")
@@ -490,9 +505,19 @@ def update_lot(lot_id, lot_number=None, quantity=None, received_date=None, expir
         # ADDED: single multi-column UPDATE replacing the loop
         set_clause = ', '.join(f"{key} = %s" for key in field)
         params = (*field.values(), lot_id)  # *field.values() unpacks column values; lot_id goes last for the WHERE
-        db.execute(cursor, f"UPDATE raw_material_lots SET {set_clause} WHERE lot_id = %s", params)
+        where = "lot_id = %s"
+        # ADDED: lot-edit-safety — only overwrite the quantity if it still holds what the user saw.
+        # Without this, a page opened before a batch ran would put the batch's deduction back.
+        if 'quantity' in field and expected_quantity is not None:
+            where += " AND ABS(quantity - %s) < %s"
+            params = (*params, expected_quantity, LOT_EXHAUST_THRESHOLD)
+        db.execute(cursor, f"UPDATE raw_material_lots SET {set_clause} WHERE {where}", params)
 
         if cursor.rowcount == 0:
+            db.execute(cursor, "SELECT 1 FROM raw_material_lots WHERE lot_id = %s", (lot_id,))
+            if cursor.fetchone():
+                db.rollback()
+                raise LotChangedError(f"lot {lot_id} quantity changed since the edit page was opened")
             raise ValueError(f"lot ID {lot_id} not found — nothing updated")
 
         if 'cost_per_unit' in field:
