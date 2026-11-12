@@ -7,7 +7,7 @@ from services.lots import (
     receive_lot, get_lots_for_material, get_all_lots_for_material,
     get_material_stock_from_lots, get_active_lots_for_materials, update_lot,
     delete_lot, get_lot_by_id, get_batches_for_lot, exhaust_lot_if_depleted,
-    LOT_EXHAUST_THRESHOLD,
+    LOT_EXHAUST_THRESHOLD, LotChangedError,
 )
 from database import get_db_connection
 
@@ -175,3 +175,58 @@ def test_delete_lot_succeeds_when_unreferenced(make_material, make_lot):
     lid = make_lot(mid, 10)
     assert delete_lot(lid) is True
     assert get_lot_by_id(lid) is None
+
+
+# lot-edit-safety: status follows a hand-edited quantity, and a stale edit can't overwrite stock.
+
+def test_update_lot_zero_marks_inactive(make_material, make_lot):
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 10)
+    assert update_lot(lid, quantity=0) is True
+    df = get_lot_by_id(lid)
+    assert df.iloc[0]["quantity"] == 0
+    assert df.iloc[0]["status"] == "inactive"
+    assert get_material_stock_from_lots(mid) == 0
+
+
+def test_update_lot_refill_reactivates_exhausted_lot(make_material, make_lot, db):
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 10)
+    # a batch used it all: the deduction path leaves it at 0 and 'inactive'
+    cur = db.cursor()
+    db.execute(cur, "UPDATE raw_material_lots SET quantity = 0 WHERE lot_id = %s", (lid,))
+    exhaust_lot_if_depleted(db, cur, lid)
+    db.commit()
+    assert update_lot(lid, quantity=25) is True
+    df = get_lot_by_id(lid)
+    assert df.iloc[0]["status"] == "active"
+    assert lid in [int(x) for x in get_lots_for_material(mid)["lot_id"]]
+
+
+def test_update_lot_without_quantity_leaves_status_alone(make_material, make_lot):
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 10)
+    update_lot(lid, quantity=0)
+    update_lot(lid, location="Fern")
+    assert get_lot_by_id(lid).iloc[0]["status"] == "inactive"
+
+
+def test_update_lot_refuses_stale_quantity(make_material, make_lot, db):
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 100)
+    # a batch draws 20 after the user opened the edit page showing 100
+    cur = db.cursor()
+    db.execute(cur, "UPDATE raw_material_lots SET quantity = 80 WHERE lot_id = %s", (lid,))
+    db.commit()
+    with pytest.raises(LotChangedError):
+        update_lot(lid, quantity=90, location="Fern", expected_quantity=100)
+    df = get_lot_by_id(lid)
+    assert df.iloc[0]["quantity"] == 80          # deduction kept
+    assert df.iloc[0]["location"] is None        # nothing else saved either
+
+
+def test_update_lot_applies_when_quantity_matches_expected(make_material, make_lot):
+    mid = make_material("Matcha")
+    lid = make_lot(mid, 100)
+    assert update_lot(lid, quantity=90, expected_quantity=100) is True
+    assert get_lot_by_id(lid).iloc[0]["quantity"] == 90

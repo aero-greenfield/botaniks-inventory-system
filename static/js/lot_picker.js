@@ -36,8 +36,11 @@ function renderLotPicker(cardsEl, materials, availableLots, batchQty, prefill) {
         card.dataset.factor = factor;      // used to convert entered display-unit qty -> base on submit
 
         var optHtml = '<option value="">-- select lot --</option>';
+        // CHANGED: lot-picker-location — show which warehouse the lot is in, e.g.
+        //          "Lot: 26260HU1 | Location: Fern | 936.00 lb available" ("—" when no location was recorded).
         lots.forEach(function (l) {
-            optHtml += '<option value="' + l.lot_id + '">' + l.lot_number + ' (' + (l.quantity / factor).toFixed(2) + unit + ' avail)</option>';
+            optHtml += '<option value="' + l.lot_id + '">Lot: ' + l.lot_number + ' | Location: ' + (l.location || '—') + ' | ' +
+                (l.quantity / factor).toFixed(2) + unit + ' available</option>';
         });
 
         card.innerHTML =

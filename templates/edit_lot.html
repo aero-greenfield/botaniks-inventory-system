@@ -30,11 +30,30 @@
             </div>
             {% else %}
             <div class="form-group">
-                <label>Quantity</label>
-                <input type="number" step="any" name="quantity" value="{{ lot[0].quantity }}" min="0.01">
+                <label>Quantity ({{ lot[0].unit }})</label>
+                <input type="number" step="any" name="quantity" id="lot-quantity" value="{{ lot[0].quantity }}" min="0">
+                <input type="hidden" name="original_quantity" value="{{ lot[0].quantity }}">
+                <small style="color:var(--text-muted);font-size:12px;">Enter 0 if the lot is empty.</small>
             </div>
             {% endif %}
         </div>
+        {% if not lot[0].is_housemade %}
+        <div class="form-row" id="adjust-reason-row">
+            <div class="form-group">
+                <label>Reason for quantity change</label>
+                <select name="adjust_reason" id="adjust-reason">
+                    <option value="">— only needed if you change the quantity —</option>
+                    {% for key, label in adjust_reasons.items() %}
+                    <option value="{{ key }}">{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Note <span style="color:var(--text-muted);font-size:12px;">(required for "Other")</span></label>
+                <input type="text" name="adjust_note" id="adjust-note" maxlength="200">
+            </div>
+        </div>
+        {% endif %}
         <div class="form-row">
             <div class="form-group">
                 <label>Expiration Date</label>
@@ -66,6 +85,26 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     </form>
 </div>
+
+{% if not lot[0].is_housemade %}
+<script>
+// The reason is only required once the quantity differs from what the page loaded with.
+// The server checks this too; this just catches it before submitting.
+(function () {
+    var qty = document.getElementById('lot-quantity');
+    var original = qty.value;
+    var reason = document.getElementById('adjust-reason');
+    var note = document.getElementById('adjust-note');
+    function sync() {
+        var changed = qty.value !== '' && Number(qty.value) !== Number(original);
+        reason.required = changed;
+        note.required = changed && reason.value === 'other';
+    }
+    qty.addEventListener('input', sync);
+    reason.addEventListener('change', sync);
+})();
+</script>
+{% endif %}
 
 <div class="section-card danger-card">
     <h2>Delete Lot</h2>
