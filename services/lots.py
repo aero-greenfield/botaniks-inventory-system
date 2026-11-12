@@ -55,7 +55,8 @@ def get_lots_for_material(material_id):
         date_now = business_now().strftime('%Y-%m-%d %H:%M:%S')  # CHANGED: server-timezone-vs-business-timezone fix
 
         db.execute(cursor,"""
-        SELECT rm_lot.lot_id, rm.name AS material_name, rm_lot.lot_number, rm_lot.quantity, rm_lot.received_date, rm_lot.status, rm_lot.expiration_date
+        SELECT rm_lot.lot_id, rm.name AS material_name, rm_lot.lot_number, rm_lot.quantity, rm_lot.received_date, rm_lot.status, rm_lot.expiration_date,
+               rm_lot.location, rm.unit
         FROM raw_material_lots rm_lot
         JOIN raw_materials rm ON rm_lot.material_id = rm.material_id
         WHERE rm_lot.material_id = %s AND rm_lot.quantity > 0 AND rm_lot.status = 'active' AND (rm_lot.expiration_date IS NULL OR rm_lot.expiration_date > %s)
@@ -63,7 +64,10 @@ def get_lots_for_material(material_id):
 
                     """, (material_id, date_now,))
         result = cursor.fetchall()
-        columns = ['lot_id', 'material_name', 'lot_number', 'quantity', 'received_date', 'status', 'expiration_date']
+        # CHANGED: lot-picker-location — location (which warehouse the lot is in) and the
+        #          material's unit, so the batch lot pickers can show "26260HU1 · Fern · 936 lb".
+        columns = ['lot_id', 'material_name', 'lot_number', 'quantity', 'received_date', 'status', 'expiration_date',
+                   'location', 'unit']
         df = pd.DataFrame(result, columns=columns)
         return df
 

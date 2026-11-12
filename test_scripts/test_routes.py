@@ -779,3 +779,16 @@ def test_edit_lot_refill_reactivates(client, auth, make_material, make_lot, db):
                                     adjust_reason="data_entry_fix"), headers=auth)
     qty, status, _ = _lot_row(db, lid)
     assert qty == 12500 and status == "active"
+
+
+def test_api_available_lots_includes_location_and_display_qty(client, auth, make_material, make_lot):
+    # lot-picker-location: the batch lot pickers show "LOT · Fern · 2.00 kg avail"
+    mid = make_material("Matcha", unit="kg")
+    make_lot(mid, 2000, lot_number="A1", location="Fern")
+    make_lot(mid, 500, lot_number="A2")
+    rows = {r["lot_number"]: r for r in client.get(f"/api/available-lots/{mid}", headers=auth).get_json()}
+    assert rows["A1"]["location"] == "Fern"
+    assert rows["A1"]["unit"] == "kg"
+    assert rows["A1"]["quantity"] == 2000           # still grams, lot_picker.js relies on it
+    assert rows["A1"]["quantity_display"] == 2.0
+    assert rows["A2"]["location"] is None           # shown as "—" in the dropdown

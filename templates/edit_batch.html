@@ -218,11 +218,14 @@
         if (!lots.length) {
             return '<span style="color:var(--danger);font-size:12px;">No lots available</span>';
         }
+        // CHANGED: lot-picker-location — show the lot's location, and the amount in the material's
+        //          unit (quantity_display). l.quantity is grams, so 936 lb used to show as ~424555.
         var opts = '<option value="">Auto (oldest first)</option>' + lots.map(function(l) {
             var sel = String(l.lot_id) === String(currentSel) ? ' selected' : '';
-            return '<option value="' + l.lot_id + '"' + sel + '>Lot ' + l.lot_number + ' (' + l.quantity + ' avail)</option>';
+            return '<option value="' + l.lot_id + '"' + sel + '>Lot: ' + l.lot_number + ' | Location: ' + (l.location || '—') + ' | ' +
+                l.quantity_display.toFixed(2) + ' ' + m.unit + ' available</option>';
         }).join('');
-        return '<select id="lot-select-' + i + '" data-material-id="' + m.material_id + '" style="font-size:12px;max-width:200px;">' + opts + '</select>';
+        return '<select id="lot-select-' + i + '" data-material-id="' + m.material_id + '" style="font-size:12px;max-width:320px;">' + opts + '</select>';
     }
 
     function originalLotsHtml(m) {

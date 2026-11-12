@@ -115,7 +115,12 @@ def api_available_lots(material_id):
     df = get_lots_for_material(material_id=material_id)
     if df is None or df.empty:
         return jsonify([])
-    return jsonify(json.loads(df.to_json(orient='records')))
+    lots = json.loads(df.to_json(orient='records'))
+    # ADDED: lot-picker-location — quantity is in the base unit (grams); also send it in the
+    #        material's own unit, which is what the Edit Batch page shows next to each ingredient.
+    for lot in lots:
+        lot['quantity_display'] = float(units.from_base(lot['quantity'], lot['unit'] or 'units'))
+    return jsonify(lots)
 # json.loads(df.to_json(orient='records')) converts the DataFrame to a list of dictionaries, 
 # which can be easily consumed by the frontend JavaScript code.
 
