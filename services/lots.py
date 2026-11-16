@@ -3,6 +3,7 @@
 from database import get_db_connection
 import pandas as pd
 import logging
+from services import order_by, search_where
 from config import business_now  # lot-expiration checks — see config.py
 
 _LOT_UPDATABLE_COLS = frozenset({"lot_number", "quantity", "received_date", "expiration_date",
@@ -253,7 +254,20 @@ def receive_lot(material_id, lot_number, quantity, received_date, expiry_date=No
         db.close()
 
 
-def get_all_lots(material_id=None, page=None, per_page=50):
+# sort feature — whitelist for get_all_lots. Dates use `IS NULL, col` so lots with no date sort last
+# on both SQLite and PostgreSQL.
+_LOT_SORT_COLS = {
+    "received": "rml.received_date IS NULL, rml.received_date",
+    "expiry": "rml.expiration_date IS NULL, rml.expiration_date",
+    "material": "rm.name",
+    "quantity": "rml.quantity",
+    "location": "rml.location IS NULL, rml.location",
+    "supplier": "rml.supplier IS NULL, rml.supplier",
+    "lot_number": "rml.lot_number",
+}
+
+
+def get_all_lots(material_id=None, page=None, per_page=50, sort_by=None, sort_dir='asc', q=None):
     """
     returns all lots, for given material_id if provided, otherwise all materials.
 
@@ -272,36 +286,32 @@ def get_all_lots(material_id=None, page=None, per_page=50):
     #          manage-lots page can convert the stored base-unit quantity/cost back for display.
     columns = ['lot_id', 'lot_number', 'material_name', 'material_id', 'quantity', 'received_date', 'expiration_date', 'location', 'supplier', 'cost_per_unit', 'status', 'unit']
 
+    # sort/search feature — conditions built from fixed SQL fragments; user input is only ever a bound param.
+    conditions, base_params = [], ()
+    if material_id:
+        conditions.append("rml.material_id = %s")
+        base_params += (material_id,)
+    where, where_params = search_where(["rml.lot_number", "rm.name", "rml.supplier", "rml.location"], q)
+    if where:
+        conditions.append(where)
+        base_params += where_params
+    where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    order_clause = order_by(_LOT_SORT_COLS, sort_by, sort_dir, "rm.name ASC, rml.received_date ASC", "rml.lot_id DESC")
+
     try:
-        if material_id:
-            base_query = """
-            SELECT rml.lot_id, rml.lot_number, rm.name AS material_name, rm.material_id,
-                   rml.quantity, rml.received_date, rml.expiration_date,
-                   rml.location, rml.supplier, rml.cost_per_unit, rml.status,
-                   rm.unit
-            FROM raw_material_lots rml
-            JOIN raw_materials rm ON rml.material_id = rm.material_id
-            WHERE rml.material_id = %s
-            ORDER BY rm.name ASC, rml.received_date ASC
-            """
-            base_params = (material_id,)
-            # ADDED: count query for this material's lots
-            count_query = "SELECT COUNT(*) FROM raw_material_lots WHERE material_id = %s"
-            count_params = (material_id,)
-        else:
-            base_query = """
-            SELECT rml.lot_id, rml.lot_number, rm.name AS material_name, rm.material_id,
-                   rml.quantity, rml.received_date, rml.expiration_date,
-                   rml.location, rml.supplier, rml.cost_per_unit, rml.status,
-                   rm.unit
-            FROM raw_material_lots rml
-            JOIN raw_materials rm ON rml.material_id = rm.material_id
-            ORDER BY rm.name ASC, rml.received_date ASC
-            """
-            base_params = ()
-            # ADDED: count all lots
-            count_query = "SELECT COUNT(*) FROM raw_material_lots"
-            count_params = ()
+        base_query = f"""
+        SELECT rml.lot_id, rml.lot_number, rm.name AS material_name, rm.material_id,
+               rml.quantity, rml.received_date, rml.expiration_date,
+               rml.location, rml.supplier, rml.cost_per_unit, rml.status,
+               rm.unit
+        FROM raw_material_lots rml
+        JOIN raw_materials rm ON rml.material_id = rm.material_id
+        {where_sql}
+        {order_clause}
+        """
+        # JOIN in the count too, so a material-name search counts the same rows it shows.
+        count_query = f"SELECT COUNT(*) FROM raw_material_lots rml JOIN raw_materials rm ON rml.material_id = rm.material_id {where_sql}"
+        count_params = base_params
 
         if page is None:
             # ADDED: page=None → full table without LIMIT (no callers currently need this

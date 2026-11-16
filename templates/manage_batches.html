@@ -51,6 +51,7 @@
 {% endblock %}
 
 {% block content %}
+{% from "_list_controls.html" import qs, sort_select, search_box %}
 
 <div class="page-header">
     <div>
@@ -58,6 +59,21 @@
         <p class="page-subtitle">Edit or remove production batches</p>
     </div>
     <a href="/create-batch" class="btn btn-primary">+ New Batch</a>
+</div>
+
+<div class="list-controls">
+    {{ search_box(list_params, 'Batch #, product, status…') }}
+    {{ sort_select([
+        ('Date (Newest)', 'date', 'desc'),
+        ('Date (Oldest)', 'date', 'asc'),
+        ('Batch # (A–Z)', 'batch_number', 'asc'),
+        ('Batch # (Z–A)', 'batch_number', 'desc'),
+        ('Product (A–Z)', 'product', 'asc'),
+        ('Product (Z–A)', 'product', 'desc'),
+        ('Qty (Low→High)', 'quantity', 'asc'),
+        ('Qty (High→Low)', 'quantity', 'desc'),
+        ('Status (A–Z)', 'status', 'asc'),
+    ], list_params) }}
 </div>
 
 {% if batches %}
@@ -175,7 +191,11 @@
 </div>
 {% else %}
 <div class="table-container" style="padding:40px 24px;text-align:center;color:var(--text-muted);">
+    {% if list_params.q %}
+    <p>No batches match &ldquo;{{ list_params.q }}&rdquo;.</p>
+    {% else %}
     <p>No batches found. <a href="/create-batch" style="color:var(--accent);">Create your first batch</a></p>
+    {% endif %}
 </div>
 {% endif %}
 
@@ -183,13 +203,13 @@
 {% if total_pages > 1 %}
 <nav style="display:flex;align-items:center;gap:12px;margin-top:24px;font-size:14px;">
     {% if page > 1 %}
-        <a href="?page={{ page - 1 }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
+        <a href="{{ qs(list_params, {'page': page - 1}) }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
     {% else %}
         <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">&#8592; Prev</span>
     {% endif %}
     <span style="color:var(--text-muted);">Page {{ page }} of {{ total_pages }} &mdash; {{ total }} batch(es)</span>
     {% if page < total_pages %}
-        <a href="?page={{ page + 1 }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
+        <a href="{{ qs(list_params, {'page': page + 1}) }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
     {% else %}
         <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">Next &#8594;</span>
     {% endif %}

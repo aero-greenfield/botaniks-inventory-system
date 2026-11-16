@@ -351,6 +351,47 @@ textarea:focus-visible,
 }
 
 /* ================================================
+   List controls — Sort dropdown + Search box (templates/_list_controls.html)
+   ================================================ */
+
+.list-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    align-items: center;
+    margin-bottom: var(--sp-4);
+}
+
+.list-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+.list-control select { cursor: pointer; }
+
+.list-search input[type="search"] {
+    min-height: 40px;          /* matches .btn height */
+    width: 240px;
+    max-width: 100%;
+    padding: 8px 12px;
+    font-family: var(--font);
+    font-size: 13.5px;
+    border: 1px solid var(--border-input);   /* VISIBLE border for warehouse contrast */
+    border-radius: 8px;
+    background: var(--card-bg);
+    color: var(--text);
+    outline: none;
+}
+
+.list-search input[type="search"]:focus {
+    border-color: var(--accent);
+    box-shadow: var(--focus-ring);
+}
+
+/* ================================================
    Buttons
    ================================================ */
 

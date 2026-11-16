@@ -37,7 +37,7 @@ from flask_wtf.csrf import CSRFProtect # security necesity.
 
 
 from services.setup import create_database
-from services.audit import log_action, view_logs
+from services.audit import log_action, view_logs, diff, current_source
 # ADDED: units-conversion-layer feature — conversion helpers (entry units -> stored base unit).
 from services import units
 from services.materials import (
@@ -122,6 +122,12 @@ use logging.info("...") instead of print
 # =======================
 
 app = Flask(__name__)  # creates flask instance, so this web app name is 'app' which can be used to run the server and define routes.
+
+
+@app.before_request
+def _tag_audit_source():
+    # Every audit row written during this request records which route wrote it.
+    current_source.set(f"{request.method} {request.path}")
 
 # CSRFprotect 
 secret = os.environ.get('SECRET_KEY')
@@ -434,6 +440,17 @@ def handle_500(e):
 MAX_PAGE = 10_000
 
 
+def _list_args(default_sort=None, default_dir='asc'):
+    """sort/search feature — (sort, dir, q, list_params) for a list page. `sort` is only used as a whitelist key
+    and `q` only as a bound param inside the services, so trimming/capping is all that's needed here."""
+    sort = request.args.get('sort') or default_sort
+    direction = 'desc' if (request.args.get('dir') or default_dir) == 'desc' else 'asc'
+    q = request.args.get('q', '').strip()[:100]
+    # The template's view of the same state (dir only when a sort is active).
+    list_params = {'sort': sort, 'dir': direction if sort else '', 'q': q}
+    return sort, direction, q, list_params
+
+
 
 
 
@@ -465,7 +482,7 @@ def index():
     # page=None returns None for the count, and df_recipes has one row per ingredient,
     # so count distinct recipes by product name.
     recipe_count = df_recipes['recipe_product_name'].nunique() if not df_recipes.empty else 0
-    df_logs = view_logs()
+    df_logs, _ = view_logs(per_page=5)
 
     return render_template("index.html",
         total_materials=len(df_materials),
@@ -473,7 +490,7 @@ def index():
         low_stock_items=df_low.to_dict(orient='records'),
         batch_count=batch_count,
         recipe_count=recipe_count,
-        recent_logs=df_logs.head(5).to_dict(orient='records'),
+        recent_logs=df_logs.to_dict(orient='records'),
     )
 
 
@@ -485,11 +502,20 @@ def index():
 @app.route('/audit-log')
 @requires_auth
 def view_audit_log():
-    df = view_logs()
+    PER_PAGE = 100
+    entity_type = request.args.get('entity_type') or None
+    entity_id = request.args.get('entity_id', type=int)
+    page = min(max(1, request.args.get('page', 1, type=int)), MAX_PAGE)
+    df, total = view_logs(entity_type, entity_id, page=page, per_page=PER_PAGE)
     logs = df.to_dict(orient='records') if not df.empty else []
     return render_template("audit_log.html",
         logs=logs,
         count=len(logs),
+        total=total,
+        page=page,
+        total_pages=math.ceil(total / PER_PAGE) if total else 1,
+        entity_type=entity_type if entity_id is not None else None,
+        entity_id=entity_id,
         back_link=True,
         back_link_url="/",
         back_link_label="Back to Home"
@@ -542,8 +568,7 @@ def view_inventory():
     page = min(max(1, int(request.args.get('page', 1))), MAX_PAGE)  # CHANGED: capped at MAX_PAGE to prevent large-OFFSET DoS
 
     # ADDED: sort feature — column + direction from URL (validated/whitelisted in the service)
-    sort = request.args.get('sort')
-    direction = request.args.get('dir', 'asc')
+    sort, direction, q, list_params = _list_args()
 
     # CHANGED: default the materials page to stock high->low when the user hasn't picked a sort.
     #          `sort`/`direction` stay None/asc so the Sort dropdown still shows "Default"; only
@@ -554,7 +579,7 @@ def view_inventory():
 
     # CHANGED: was get_all_materials() returning a plain df.
     #          Now returns (df, total) tuple; page= triggers LIMIT/OFFSET in the query.
-    df, total = get_all_materials(page=page, per_page=PER_PAGE, sort_by=effective_sort, sort_dir=effective_dir)
+    df, total = get_all_materials(page=page, per_page=PER_PAGE, sort_by=effective_sort, sort_dir=effective_dir, q=q)
 
     materials = df.to_dict(orient='records') if not df.empty else []
     # ADDED: compute total page count for pagination controls in the template
@@ -566,7 +591,7 @@ def view_inventory():
     offset_raw = 0
     offset_housemade = 0
     if page > 1:
-        full_df, _ = get_all_materials(page=None, sort_by=effective_sort, sort_dir=effective_dir)
+        full_df, _ = get_all_materials(page=None, sort_by=effective_sort, sort_dir=effective_dir, q=q)
         if not full_df.empty:
             preceding = full_df.iloc[:(page - 1) * PER_PAGE]
             offset_housemade = int(preceding['is_housemade'].fillna(0).astype(bool).sum())
@@ -588,8 +613,7 @@ def view_inventory():
         offset_housemade=offset_housemade,
         total_pages=total_pages,
         total=total,
-        sort=sort,
-        direction=direction,
+        list_params=list_params,
         back_link=True,
         back_link_url="/",
         back_link_label="Back to Home"
@@ -754,7 +778,8 @@ def receive_lot():
                 back_link=True, back_link_url="/receive-lot", back_link_label="Go back"), 500
 
         #success. 
-        log_action('lot_received', f"material={name}, lot={lot_number}, qty={quantity}, date={received_date}")
+        log_action('lot_received', f"material={name}, lot={lot_number}, qty={quantity}, date={received_date}",
+                   entity=('lot', lot_id))
         return redirect(url_for('view_inventory'))
 
 
@@ -914,7 +939,8 @@ def add_material_route():
 
         elif result: # if result is good.
             logging.info(f"Material added: '{name}' | category={category}, unit={unit}")
-            log_action('material_added', f"name={name}, category={category}, unit={unit}")
+            log_action('material_added', f"name={name}, category={category}, unit={unit}",
+                       entity=('material', result))
             if from_receive_lot == '1': #if this route was directed via lot recieve func, go back to that when done.
                 return redirect(url_for('receive_lot',
                     material_name=name,
@@ -1017,11 +1043,10 @@ def manage_materials():
     page = min(max(1, int(request.args.get('page', 1))), MAX_PAGE)  # CHANGED: capped at MAX_PAGE to prevent large-OFFSET DoS
 
     # ADDED: sort feature — column + direction from URL (validated/whitelisted in the service)
-    sort = request.args.get('sort')
-    direction = request.args.get('dir', 'asc')
+    sort, direction, q, list_params = _list_args()
 
     # CHANGED: get_all_materials now returns (df, total) tuple
-    df, total = get_all_materials(page=page, per_page=PER_PAGE, sort_by=sort, sort_dir=direction)
+    df, total = get_all_materials(page=page, per_page=PER_PAGE, sort_by=sort, sort_dir=direction, q=q)
 
     materials = df.to_dict(orient='records') if (df is not None and not df.empty) else []
     # ADDED: total_pages for pagination controls in template
@@ -1033,8 +1058,7 @@ def manage_materials():
         page=page,
         total_pages=total_pages,
         total=total,
-        sort=sort,
-        direction=direction,
+        list_params=list_params,
         back_link=True,
         back_link_url="/",
         back_link_label="Back to Home"
@@ -1150,6 +1174,7 @@ def update_material_details(material_id):
         ), 400
     reorder_level = float(units.to_base(reorder_level, unit))
 
+    before_row = get_material_by_id(material_id)
     result = update_raw_material(material_id, name=name, category=category, unit=unit,
                                  reorder_level=reorder_level,
                                  dimension=dimension,  # ADDED: units-conversion-layer feature
@@ -1157,7 +1182,13 @@ def update_material_details(material_id):
 
     if result:
         logging.info(f"Material details updated: material_id={material_id}, name={name}, category={category}, unit={unit}")
-        log_action('material_updated', f"material_id={material_id}, name={name}, category={category}")
+        before = dict(zip(['material_id', 'name', 'category', 'unit', 'reorder_level', 'is_edible',
+                           'is_organic', 'dimension'], before_row or ()))
+        after = {k: v for k, v in dict(name=name, category=category, unit=unit, reorder_level=reorder_level,
+                                       dimension=dimension, is_edible=is_edible, is_organic=is_organic).items()
+                 if v is not None}
+        log_action('material_updated', f"name={name}", entity=('material', material_id),
+                   changes=diff(before, after))
         # CHANGED: was url_for(..., msg=...) — moved to flash() so messages are session-backed
         flash('Details updated successfully', 'success')
         return redirect(url_for('edit_material', material_id=material_id))
@@ -1171,6 +1202,7 @@ def update_material_details(material_id):
 @requires_auth
 def delete_material(material_id):
     
+    material = get_material_by_id(material_id)
     result = delete_raw_material(material_id)
     if not result:
         return render_template('error.html',
@@ -1178,7 +1210,10 @@ def delete_material(material_id):
             message="Could not delete material. Please try again.",
         ), 500
     logging.info(f"Material deleted: material_id={material_id}")
-    log_action('material_deleted', f"material_id={material_id}")
+    # Deleting a material also deletes its lots, recipe lines and batch_materials rows.
+    log_action('material_deleted', f"name={material[1] if material else None}, "
+                                   f"affected_batches={result.get('affected_batches')}",
+               entity=('material', material_id))
     if result.get("affected_batches"):
         count = len(result["affected_batches"])
         warning = f"Material deleted. Note: it was used in {count} batch(es) — those records no longer show this ingredient."
@@ -1213,11 +1248,13 @@ def toggle_material_flag(material_id, field):
     # get_material_by_id returns (mat_id, name, category, unit, reorder_level, is_edible, is_organic)
     current = bool(material[5] if field == 'is_edible' else material[6])
     update_raw_material(material_id, **{field: not current})
-    log_action('material_flag_toggled', f"material_id={material_id}, {field}={not current}")
+    log_action('material_flag_toggled', f"name={material[1]}", entity=('material', material_id),
+               changes={field: [current, not current]})
 
-    # Preserve the manage-materials pagination position the user clicked from.
+    # Preserve the manage-materials pagination position (and sort/search) the user clicked from.
     page = request.args.get('page', 1)
-    return redirect(url_for('manage_materials', page=page))
+    keep = {k: request.args[k] for k in ('sort', 'dir', 'q') if request.args.get(k)}
+    return redirect(url_for('manage_materials', page=page, **keep))
 
 
 
@@ -1255,10 +1292,14 @@ def view_batches():
     # Only 'asc'/'desc' are meaningful; the service whitelists anything else to 'desc'.
     ready_sort   = 'asc' if request.args.get('ready_sort') == 'asc' else 'desc'
     planned_sort = 'asc' if request.args.get('planned_sort') == 'asc' else 'desc'
+    # sort/search feature — column per tab (whitelisted in the service) + one search box for both tabs.
+    ready_by   = request.args.get('ready_by') or 'date'
+    planned_by = request.args.get('planned_by') or 'date'
+    q = request.args.get('q', '').strip()[:100]
 
     # CHANGED: get_batches and get_batches_planned now return (df, total) tuples
-    data, ready_total         = get_batches(page=ready_page, per_page=PER_PAGE, sort=ready_sort)
-    planned_data, planned_total = get_batches_planned(page=planned_page, per_page=PER_PAGE, sort=planned_sort)
+    data, ready_total         = get_batches(page=ready_page, per_page=PER_PAGE, sort=ready_sort, sort_by=ready_by, q=q)
+    planned_data, planned_total = get_batches_planned(page=planned_page, per_page=PER_PAGE, sort=planned_sort, sort_by=planned_by, q=q)
 
     # PRESERVED: Python standard/mix split — unchanged, still runs on whatever slice the query returned
     all_ready    = data.to_dict(orient='records') if not data.empty else []
@@ -1298,6 +1339,9 @@ def view_batches():
         # sort feature — current direction per section, so headers can render/toggle the arrow
         ready_sort=ready_sort,
         planned_sort=planned_sort,
+        # sort/search feature — current query state; the template adds `tab` per link.
+        list_params={'ready_by': ready_by, 'ready_sort': ready_sort,
+                     'planned_by': planned_by, 'planned_sort': planned_sort, 'q': q},
         # row-numbering feature — per-tab page offsets so each tab's # continues across its pages.
         ready_offset=(ready_page - 1) * PER_PAGE,
         planned_offset=(planned_page - 1) * PER_PAGE,
@@ -1641,7 +1685,8 @@ def create_batch():
             result = add_to_batches(product_name, quantity, notes=notes, batch_number=batch_number, deduct_resources=True, expiration_date=expiration_date, planned_completion_date=planned_completion_date, batch_type=batch_type, allow_negative=confirm_negative, lot_selections=lot_selections, deduction_mode=deduction_mode)
             if result:
                 logging.info(f"Batch created: product='{product_name}', quantity={quantity}, batch_number={batch_number}, batch_type={batch_type}")
-                log_action('batch_created', f"product={product_name}, quantity={quantity}, batch_id={result}, batch_number={batch_number}, batch_type={batch_type}, deduction_mode={deduction_mode}")
+                log_action('batch_created', f"product={product_name}, quantity={quantity}, batch_number={batch_number}, batch_type={batch_type}, deduction_mode={deduction_mode}",
+                           entity=('batch', result))
                 return redirect(url_for('view_batches'))
             else:
                 return render_template('error.html',
@@ -1703,7 +1748,8 @@ def manage_batches():
     page = min(max(1, int(request.args.get('page', 1))), MAX_PAGE)  # CHANGED: capped at MAX_PAGE to prevent large-OFFSET DoS
 
     # CHANGED: get_all_batches_with_id now returns (df, total) tuple
-    df, total = get_all_batches_with_id(page=page, per_page=PER_PAGE)
+    sort, direction, q, list_params = _list_args(default_dir='desc')
+    df, total = get_all_batches_with_id(page=page, per_page=PER_PAGE, sort_by=sort, sort_dir=direction, q=q)
 
     batches = df.to_dict(orient='records') if (df is not None and not df.empty) else []
     # ADDED: total_pages for pagination controls in the template
@@ -1715,6 +1761,7 @@ def manage_batches():
         page=page,
         total_pages=total_pages,
         total=total,
+        list_params=list_params,
         back_link=True,
         back_link_url="/",
         back_link_label="Back to Home"
@@ -1912,18 +1959,25 @@ def update_batch_details(batch_id):
 
     if result:
         logging.info(f"Batch details updated: batch_id={batch_id}, product_name={product_name}, quantity={quantity}")
-        log_action('batch_updated', f"batch_id={batch_id}, product_name={product_name}, quantity={quantity}")
+        before = dict(zip(['batch_id', 'product_name', 'quantity', 'date_completed', 'status', 'notes',
+                           'date_shipped', 'expiration_date', 'planned_completion_date'], existing or ()))
+        after = {k: v for k, v in dict(product_name=product_name, quantity=quantity, notes=notes,
+                                       expiration_date=expiration_date,
+                                       planned_completion_date=planned_completion_date).items()
+                 if v is not None}
+        log_action('batch_updated', None, entity=('batch', batch_id), changes=diff(before, after))
 
         if quantity_changed:
             clear_planned_lot_selections(batch_id)
-            log_action('planned_lots_cleared', f"batch_id={batch_id}, reason=quantity_changed")
+            log_action('planned_lots_cleared', "reason=quantity_changed", entity=('batch', batch_id))
             flash('Quantity changed — lot selections were cleared. Re-select lots, or the oldest lots (FIFO) will be used at the planned date.', 'warning')
 
         if new_quantities:
-            log_action('batch_materials_adjusted', f"batch_id={batch_id}, adjustments={new_quantities}")
+            log_action('batch_materials_adjusted', f"adjustments={new_quantities}", entity=('batch', batch_id))
             flash('Batch details and material deductions updated successfully', 'success')
         elif quantity is not None:
-            log_action('batch_materials_reconciled', f"batch_id={batch_id}, quantity={quantity}, mode=proportional")
+            log_action('batch_materials_reconciled', f"quantity={quantity}, mode=proportional",
+                       entity=('batch', batch_id))
             flash('Batch details updated — raw material deductions were adjusted to match the new quantity', 'success')
         else:
             flash('Batch details updated successfully', 'success')
@@ -2038,7 +2092,8 @@ def change_batch_status(batch_id):
             return redirect(url_for('edit_batch', batch_id=batch_id))
     if result:
         logging.info(f"Batch status changed: batch_id={batch_id}, new_status={new_status}")
-        log_action('batch_status_changed', f"batch_id={batch_id}, new_status={new_status}")
+        log_action('batch_status_changed', None, entity=('batch', batch_id),
+                   changes={'status': [current[4] if current else None, new_status]})
         # CHANGED: was url_for(..., msg=...) — moved to flash()
         flash(f'Batch status updated to {new_status}', 'success')
         # The Batches page's "Mark Ready" button sends next=batches so staff land back there, not on edit.
@@ -2079,6 +2134,7 @@ def delete_batch_route(batch_id):
 
 
 
+    batch = get_batch_by_id(batch_id)
     result = delete_batch(batch_id, materials_to_reallocate, reallocate=bool(materials_to_reallocate))
     if result == "shipped":
         return render_template('error.html',
@@ -2091,7 +2147,9 @@ def delete_batch_route(batch_id):
             message="Could not delete batch. The batch may not exist.",
         ), 500
     logging.info(f"Batch deleted: batch_id={batch_id}, reallocate={bool(materials_to_reallocate)}")
-    log_action('batch_deleted', f"batch_id={batch_id}, reallocate={bool(materials_to_reallocate)}")
+    log_action('batch_deleted', f"batch_number={batch[10] if batch else None}, product={batch[1] if batch else None}, "
+                                f"quantity={batch[2] if batch else None}, reallocated={materials_to_reallocate}",
+               entity=('batch', batch_id))
     return redirect(url_for('manage_batches'))
 
 
@@ -2130,11 +2188,13 @@ def view_recipes():
 
     # CHANGED: get_all_recipes now returns (df, total). Pagination is at the recipe level
     #          (never splits a recipe across pages). total = total number of distinct recipes.
-    df, total = get_all_recipes(page=page, per_page=PER_PAGE)
+    sort, direction, q, list_params = _list_args()
+    list_params['kind'] = '' if kind == 'all' else kind
+    df, total = get_all_recipes(page=page, per_page=PER_PAGE, sort_by=sort, sort_dir=direction, q=q)
 
     if df.empty:
         return render_template("recipes.html",
-            recipes=[], recipe_count=0, kind=kind, offset=offset,
+            recipes=[], recipe_count=0, kind=kind, offset=offset, list_params=list_params,
             page=1, total_pages=1, total=0,
             back_link=True, back_link_url="/", back_link_label="Back to Home"
     )
@@ -2198,6 +2258,7 @@ def view_recipes():
         recipes=recipes,
         recipe_count=recipe_count,
         kind=kind,
+        list_params=list_params,
         offset=offset,
         page=page,
         total_pages=total_pages,
@@ -2428,7 +2489,8 @@ def add_recipe_route():
             if result:
                 #success
                 logging.info(f"Recipe added: '{product_name}' with {len(materials)} materials")
-                log_action('recipe_added', f"product_name={product_name}, materials={len(materials)}")
+                log_action('recipe_added', f"product_name={product_name}, materials={len(materials)}",
+                           entity=('recipe', result))
                 return redirect(url_for('view_recipes'))
             else:
                 
@@ -2474,7 +2536,8 @@ def manage_recipes():
     page = min(max(1, int(request.args.get('page', 1))), MAX_PAGE)  # CHANGED: capped at MAX_PAGE to prevent large-OFFSET DoS
 
     # CHANGED: get_all_recipes_with_id now returns (df, total) tuple
-    df, total = get_all_recipes_with_id(page=page, per_page=PER_PAGE)
+    sort, direction, q, list_params = _list_args()
+    df, total = get_all_recipes_with_id(page=page, per_page=PER_PAGE, sort_by=sort, sort_dir=direction, q=q)
 
     recipes = df.to_dict(orient='records') if (df is not None and not df.empty) else []
     # ADDED: total_pages for pagination controls in template
@@ -2486,6 +2549,7 @@ def manage_recipes():
         page=page,
         total_pages=total_pages,
         total=total,
+        list_params=list_params,
         back_link=True,
         back_link_url="/",
         back_link_label="Back to Home"
@@ -2663,12 +2727,22 @@ def update_recipe_route(recipe_id):
             back_link=True, back_link_url=f"/edit-recipe/{recipe_id}", back_link_label="Go back"
         ), 400
     
+    before_df = get_recipe_by_id(recipe_id)
     result = update_recipe(recipe_id, product_name=product_name, notes=notes, materials=materials, product_unit=product_unit, product_dimension=product_dimension, batch_type=batch_type)
     
 
     if result:
         logging.info(f"Recipe updated: recipe_id={recipe_id}, product_name={product_name}")
-        log_action('recipe_updated', f"recipe_id={recipe_id}, product_name={product_name}")
+        before = {}
+        if before_df is not None and not before_df.empty:
+            before = before_df.iloc[0][['product_name', 'notes', 'product_unit', 'product_dimension', 'batch_type']].to_dict()
+            before['materials'] = {r.material_name: r.quantity_needed for r in before_df.itertuples() if r.material_name}
+        after = {k: v for k, v in dict(product_name=product_name, notes=notes, product_unit=product_unit,
+                                       product_dimension=product_dimension, batch_type=batch_type,
+                                       materials={m['material_name']: m['quantity_needed'] for m in materials}).items()
+                 if v is not None}
+        log_action('recipe_updated', f"product_name={product_name}", entity=('recipe', recipe_id),
+                   changes=diff(before, after))
         # CHANGED: was url_for(..., msg=...) — moved to flash()
         flash('Recipe details updated successfully', 'success')
         return redirect(url_for('edit_recipe', recipe_id=recipe_id))
@@ -2686,6 +2760,7 @@ def delete_recipe_route(recipe_id):
     POST route
     """
     
+    recipe_df = get_recipe_by_id(recipe_id)
     result = delete_recipe_by_id(recipe_id)
     if not result:
         return render_template('error.html',
@@ -2693,7 +2768,8 @@ def delete_recipe_route(recipe_id):
             message="Could not delete recipe. Please try again.",
         ), 500
     logging.info(f"Recipe deleted: recipe_id={recipe_id}")
-    log_action('recipe_deleted', f"recipe_id={recipe_id}")
+    name = recipe_df['product_name'].iloc[0] if recipe_df is not None and not recipe_df.empty else None
+    log_action('recipe_deleted', f"product_name={name}", entity=('recipe', recipe_id))
     return redirect(url_for('manage_recipes'))
 
 
@@ -2716,7 +2792,8 @@ def manage_lots():
     page = min(max(1, int(request.args.get('page', 1))), MAX_PAGE)  # CHANGED: capped at MAX_PAGE to prevent large-OFFSET DoS
 
     # CHANGED: get_all_lots now returns (df, total) tuple
-    df, total = get_all_lots(page=page, per_page=PER_PAGE)
+    sort, direction, q, list_params = _list_args(default_sort='received', default_dir='desc')
+    df, total = get_all_lots(page=page, per_page=PER_PAGE, sort_by=sort, sort_dir=direction, q=q)
 
     lots = df.to_dict(orient='records') if (df is not None and not df.empty) else []
     # ADDED: total_pages for pagination controls in template
@@ -2728,6 +2805,7 @@ def manage_lots():
         page=page,
         total_pages=total_pages,
         total=total,
+        list_params=list_params,
         back_link=True,
         back_link_url="/",
         back_link_label="Back to Home"
@@ -2930,14 +3008,19 @@ def update_lot_route(lot_id):
 
         if result:
             logging.info(f"Lot updated: lot_id={lot_id}, lot_number={lot_number}, quantity={quantity}")
-            log_action('lot_updated', f"lot_id={lot_id}, lot_number={lot_number}, quantity={quantity}")
+            before = lot_df.iloc[0].to_dict()
+            after = {k: v for k, v in dict(lot_number=lot_number, quantity=quantity, expiration_date=expiration_date,
+                                           location=location, cost_per_unit=cost_per_unit, supplier=supplier).items()
+                     if v is not None}
+            log_action('lot_updated', None, entity=('lot', lot_id), changes=diff(before, after))
             if quantity is not None:
                 note = f", note={adjust_note}" if adjust_note else ""
                 old_display = float(units.from_base(lot_df['quantity'].iloc[0], lot_unit))
                 log_action('lot_quantity_adjusted',
-                           f"lot_id={lot_id}, lot_number={lot_df['lot_number'].iloc[0]}, "
+                           f"lot_number={lot_df['lot_number'].iloc[0]}, "
                            f"{old_display:g} {lot_unit} -> {quantity_display:g} {lot_unit}, "
-                           f"reason={LOT_ADJUST_REASONS[adjust_reason]}{note}")
+                           f"reason={LOT_ADJUST_REASONS[adjust_reason]}{note}",
+                           entity=('lot', lot_id))
             # CHANGED: was url_for(..., msg=...) — moved to flash()
             flash('Lot details updated successfully', 'success')
             return redirect(url_for('edit_lot', lot_id=lot_id))
@@ -2992,7 +3075,8 @@ def delete_lot_route(lot_id):
     result = delete_lot(lot_id)
 
     if result:
-        log_action('lot_deleted', f"lot_id={lot_id}, lot_number={lot_number}")
+        log_action('lot_deleted', f"lot_number={lot_number}, material={lot_df['material_name'].iloc[0]}, "
+                                  f"quantity={lot_df['quantity'].iloc[0]}", entity=('lot', lot_id))
         # CHANGED: was url_for(..., msg=...) — moved to flash()
         flash('Lot deleted successfully', 'success')
         return redirect(url_for('manage_lots'))
@@ -3008,9 +3092,10 @@ def delete_lot_route(lot_id):
 @app.route('/shipments')
 @requires_auth
 def shipments_list():
-    page = request.args.get('page', 1, type=int)
+    page = min(max(1, request.args.get('page', 1, type=int)), MAX_PAGE)
     per_page = 50
-    df, total = get_all_shipments(page=page, per_page=per_page)
+    sort, direction, q, list_params = _list_args(default_dir='desc')
+    df, total = get_all_shipments(page=page, per_page=per_page, sort_by=sort, sort_dir=direction, q=q)
     total_pages = math.ceil(total / per_page) if total else 1
     shipments = df.to_dict('records') if not df.empty else []
     return render_template('shipments.html',
@@ -3020,6 +3105,7 @@ def shipments_list():
         page=page,
         total_pages=total_pages,
         total=total or 0,
+        list_params=list_params,
     )
 
 
@@ -3119,9 +3205,11 @@ def create_shipment_route():
 @app.route('/manage-shipments')
 @requires_auth
 def manage_shipments():
-    df, _ = get_all_shipments(page=None)
+    sort, direction, q, list_params = _list_args(default_dir='desc')
+    df, _ = get_all_shipments(page=None, sort_by=sort, sort_dir=direction, q=q)
     shipments = df.to_dict('records') if not df.empty else []
-    return render_template('manage_shipments.html', shipments=shipments)
+    return render_template('manage_shipments.html', shipments=shipments,
+        list_params=list_params)
 
 
 @app.route('/edit-shipment/<int:shipment_id>')

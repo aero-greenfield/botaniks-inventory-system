@@ -229,8 +229,22 @@ def create_database():
                    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
                    action TEXT NOT NULL,
                    details TEXT,
-                   timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                   timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                   entity_type TEXT,
+                   entity_id INTEGER,
+                   changes TEXT,
+                   source TEXT,
+                   app_version TEXT
                    )""")
+
+    # ADDED: audit-log refactor — additive migration for pre-existing SQLite DBs (same pattern as
+    # deduction_mode above). Old rows keep NULLs; Postgres steps are in RUNBOOK.md.
+    cursor.execute("PRAGMA table_info(audit_log)")
+    _audit_cols = {row[1] for row in cursor.fetchall()}
+    for col, col_type in [("entity_type", "TEXT"), ("entity_id", "INTEGER"), ("changes", "TEXT"),
+                          ("source", "TEXT"), ("app_version", "TEXT")]:
+        if col not in _audit_cols:
+            cursor.execute(f"ALTER TABLE audit_log ADD COLUMN {col} {col_type}")
 
 
 
@@ -243,6 +257,7 @@ def create_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_bm_material_id    ON batch_materials(material_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sb_shipment_id    ON shipment_batches(shipment_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sb_batch_id       ON shipment_batches(batch_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_entity      ON audit_log(entity_type, entity_id)")
 
     # Save all table creations to the database
     conn.commit()

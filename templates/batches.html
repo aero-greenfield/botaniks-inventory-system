@@ -73,6 +73,7 @@
 {% endblock %}
 
 {% block content %}
+{% from "_list_controls.html" import qs, sort_select, search_box %}
 
 <div class="page-header">
     <div>
@@ -84,6 +85,10 @@
         <a href="/export/batches-excel" class="btn btn-secondary">&#8595; Export Excel</a>
         <a href="/create-batch" class="btn btn-primary">+ New Batch</a>
     </div>
+</div>
+
+<div class="list-controls">
+    {{ search_box(list_params, 'Batch # or product…', tab_field=True) }}
 </div>
 
 {# ── Status tab bar ───────────────────────────── #}
@@ -101,6 +106,19 @@
 
 {# ===== READY TAB ===== #}
 <div id="panel-ready" class="tab-panel active">
+    <div class="list-controls">
+        {{ sort_select([
+            ('Completed (Newest)', 'date', 'desc'),
+            ('Completed (Oldest)', 'date', 'asc'),
+            ('Product (A–Z)', 'product', 'asc'),
+            ('Product (Z–A)', 'product', 'desc'),
+            ('Available (Low→High)', 'available', 'asc'),
+            ('Available (High→Low)', 'available', 'desc'),
+            ('Cost (High→Low)', 'cost', 'desc'),
+            ('Cost (Low→High)', 'cost', 'asc'),
+            ('Batch # (A–Z)', 'batch_number', 'asc'),
+        ], list_params, col_key='ready_by', dir_key='ready_sort', include_default=False) }}
+    </div>
 
     {% if ready_standard or ready_mix %}
     {# Count rows that will be hidden by default so we only show the relevant toggles. #}
@@ -122,13 +140,7 @@
                     <th>Product</th>
                     <th>Type</th>
                     <th class="num">Available</th>
-                    {# sort feature — toggle date_completed order; preserve the Planned tab's sort. #}
-                    <th>
-                        <a class="sort-link" href="?ready_sort={{ 'asc' if ready_sort == 'desc' else 'desc' }}&amp;planned_sort={{ planned_sort }}">
-                            Completed
-                            <span class="sort-arrow">{{ '↑' if ready_sort == 'asc' else '↓' }}</span>
-                        </a>
-                    </th>
+                    <th>Completed</th>
                     {# ADDED: cost-of-material feature — total material cost for this batch. #}
                     <th>Cost</th>
                     <th>Actions</th>
@@ -217,20 +229,20 @@
     </div>
     {% else %}
     <div class="table-container" style="padding:40px 24px;text-align:center;color:var(--text-muted);">
-        No ready batches. <a href="/create-batch" style="color:var(--accent);">Create one</a>
+        {% if list_params.q %}No ready batches match &ldquo;{{ list_params.q }}&rdquo;.{% else %}No ready batches. <a href="/create-batch" style="color:var(--accent);">Create one</a>{% endif %}
     </div>
     {% endif %}
 
     {% if ready_total_pages > 1 %}
     <nav style="display:flex;align-items:center;gap:12px;margin-top:24px;font-size:14px;">
         {% if ready_page > 1 %}
-            <a href="?ready_page={{ ready_page - 1 }}&planned_page={{ planned_page }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
+            <a href="{{ qs(list_params, {'ready_page': ready_page - 1, 'planned_page': planned_page}) }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
         {% else %}
             <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">&#8592; Prev</span>
         {% endif %}
         <span style="color:var(--text-muted);">Ready Page {{ ready_page }} of {{ ready_total_pages }}</span>
         {% if ready_page < ready_total_pages %}
-            <a href="?ready_page={{ ready_page + 1 }}&planned_page={{ planned_page }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
+            <a href="{{ qs(list_params, {'ready_page': ready_page + 1, 'planned_page': planned_page}) }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
         {% else %}
             <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">Next &#8594;</span>
         {% endif %}
@@ -241,6 +253,17 @@
 
 {# ===== PLANNED TAB ===== #}
 <div id="panel-planned" class="tab-panel">
+    <div class="list-controls">
+        {{ sort_select([
+            ('Planned Date (Latest)', 'date', 'desc'),
+            ('Planned Date (Soonest)', 'date', 'asc'),
+            ('Product (A–Z)', 'product', 'asc'),
+            ('Product (Z–A)', 'product', 'desc'),
+            ('Qty (Low→High)', 'quantity', 'asc'),
+            ('Qty (High→Low)', 'quantity', 'desc'),
+            ('Batch # (A–Z)', 'batch_number', 'asc'),
+        ], dict(list_params, tab='planned'), col_key='planned_by', dir_key='planned_sort', include_default=False) }}
+    </div>
 
     {% if planned_standard or planned_mix %}
     <div class="table-container">
@@ -253,13 +276,7 @@
                     <th>Product</th>
                     <th>Type</th>
                     <th>Qty</th>
-                    {# sort feature — toggle planned_completion_date order; preserve the Ready tab's sort. #}
-                    <th>
-                        <a class="sort-link" href="?planned_sort={{ 'asc' if planned_sort == 'desc' else 'desc' }}&amp;ready_sort={{ ready_sort }}&amp;tab=planned">
-                            Planned Completion
-                            <span class="sort-arrow">{{ '↑' if planned_sort == 'asc' else '↓' }}</span>
-                        </a>
-                    </th>
+                    <th>Planned Completion</th>
                     {# planned-deduction-mode feature — has this batch's stock moved yet? #}
                     <th>Materials</th>
                     <th>Actions</th>
@@ -366,20 +383,20 @@
     </div>
     {% else %}
     <div class="table-container" style="padding:40px 24px;text-align:center;color:var(--text-muted);">
-        No planned batches.
+        {% if list_params.q %}No planned batches match &ldquo;{{ list_params.q }}&rdquo;.{% else %}No planned batches.{% endif %}
     </div>
     {% endif %}
 
     {% if planned_total_pages > 1 %}
     <nav style="display:flex;align-items:center;gap:12px;margin-top:24px;font-size:14px;">
         {% if planned_page > 1 %}
-            <a href="?ready_page={{ ready_page }}&planned_page={{ planned_page - 1 }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
+            <a href="{{ qs(list_params, {'ready_page': ready_page, 'planned_page': planned_page - 1, 'tab': 'planned'}) }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
         {% else %}
             <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">&#8592; Prev</span>
         {% endif %}
         <span style="color:var(--text-muted);">Planned Page {{ planned_page }} of {{ planned_total_pages }}</span>
         {% if planned_page < planned_total_pages %}
-            <a href="?ready_page={{ ready_page }}&planned_page={{ planned_page + 1 }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
+            <a href="{{ qs(list_params, {'ready_page': ready_page, 'planned_page': planned_page + 1, 'tab': 'planned'}) }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
         {% else %}
             <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">Next &#8594;</span>
         {% endif %}
@@ -394,6 +411,9 @@ function switchTab(name) {
     document.querySelectorAll('.tab-bar .tab[id]').forEach(function(t) { t.classList.remove('active'); });
     document.getElementById('panel-' + name).classList.add('active');
     document.getElementById('tab-' + name).classList.add('active');
+    // sort/search feature — a search submitted from this tab reopens on this tab.
+    var tabField = document.getElementById('search-tab');
+    if (tabField) tabField.value = name;
 }
 
 // Honor ?tab= param from URL (e.g. coming from shipped page)

@@ -1,10 +1,11 @@
 from database import get_db_connection
-from services.audit import log_action
+from services.audit import log_action, diff
 from services import units
 from datetime import datetime
 from config import business_today
 import logging
 import pandas as pd
+from services import order_by, search_where
 
 _UNSET = object()
 _EPS = 1e-9  # float tolerance when comparing allocated REAL quantities against a batch total
@@ -142,8 +143,9 @@ def create_shipment(lines, destination=None, notes=None, category=None, date_shi
             """, (shipment_id, batch_id, qty))
             _recompute_batch_status(cursor, db, batch_id) # update the status of the batch
 
+        log_action('shipment_created', f"number={shipment_number}, lines={normalized}",
+                   entity=('shipment', shipment_id), db=db, cursor=cursor)
         db.commit()
-        log_action('shipment_created', f"shipment_id={shipment_id}, number={shipment_number}, lines={normalized}")
         return shipment_id
 
     except ValueError:
@@ -159,35 +161,50 @@ def create_shipment(lines, destination=None, notes=None, category=None, date_shi
         db.close()
 
 
-def get_all_shipments(page=None, per_page=50):
+# sort/search feature — whitelist (URL key → SQL) for the shipments list pages.
+_SHIPMENT_SORT_COLS = {
+    "date": "s.date_shipped IS NULL, s.date_shipped",
+    "shipment_number": "s.shipment_number",
+    "destination": "s.destination IS NULL, s.destination",
+    "category": "s.category IS NULL, s.category",
+    "batches": "batch_count",
+}
+
+
+def get_all_shipments(page=None, per_page=50, sort_by=None, sort_dir='desc', q=None):
     """
     Returns (DataFrame, total) of all shipments with the number of batch lines on each.
     page=None returns all records without LIMIT (used by /manage-shipments).
+    sort_by = a _SHIPMENT_SORT_COLS key; q = shipment # / destination / category search.
     """
     db = get_db_connection()
     cursor = db.cursor()
+    order_clause = order_by(_SHIPMENT_SORT_COLS, sort_by, sort_dir, "s.shipment_id DESC", "s.shipment_id DESC")
+    where, where_params = search_where(["s.shipment_number", "s.destination", "s.category"], q)
+    where_sql = f"WHERE {where}" if where else ""
 
     columns = ['shipment_id', 'shipment_number', 'date_shipped', 'destination', 'notes', 'category', 'batch_count']
-    base_query = """
+    base_query = f"""
     SELECT s.shipment_id, s.shipment_number, s.date_shipped, s.destination, s.notes, s.category,
            COUNT(sb.shipment_batch_id) AS batch_count
     FROM shipments s
     LEFT JOIN shipment_batches sb ON sb.shipment_id = s.shipment_id
+    {where_sql}
     GROUP BY s.shipment_id, s.shipment_number, s.date_shipped, s.destination, s.notes, s.category
-    ORDER BY s.shipment_id DESC
+    {order_clause}
     """
 
     try:
         if page is None:
-            db.execute(cursor, base_query)
+            db.execute(cursor, base_query, where_params or None)
             result = cursor.fetchall()
             return (pd.DataFrame(result, columns=columns), None)
 
-        db.execute(cursor, "SELECT COUNT(*) FROM shipments")
+        db.execute(cursor, f"SELECT COUNT(*) FROM shipments s {where_sql}", where_params or None)
         total = cursor.fetchone()[0]
 
         offset = (page - 1) * per_page
-        db.execute(cursor, base_query + " LIMIT %s OFFSET %s", (per_page, offset))
+        db.execute(cursor, base_query + " LIMIT %s OFFSET %s", where_params + (per_page, offset))
         result = cursor.fetchall()
         return (pd.DataFrame(result, columns=columns), total)
 
@@ -418,9 +435,12 @@ def update_shipment(shipment_id, destination=_UNSET, notes=_UNSET, category=_UNS
     cursor = db.cursor()
 
     try:
-        db.execute(cursor, "SELECT shipment_id FROM shipments WHERE shipment_id = %s", (shipment_id,))
-        if not cursor.fetchone():
+        db.execute(cursor, """SELECT destination, notes, category, date_shipped, shipment_number
+                              FROM shipments WHERE shipment_id = %s""", (shipment_id,))
+        row = cursor.fetchone()
+        if not row:
             raise ValueError(f"Shipment {shipment_id} not found — nothing updated.")
+        before = dict(zip(['destination', 'notes', 'category', 'date_shipped', 'shipment_number'], row))
 
         if shipment_number is not _UNSET:
             db.execute(cursor, "SELECT shipment_id FROM shipments WHERE shipment_number = %s AND shipment_id != %s",
@@ -448,9 +468,11 @@ def update_shipment(shipment_id, destination=_UNSET, notes=_UNSET, category=_UNS
         # --- line edits ---
         if lines is not _UNSET:
             db.execute(cursor,
-                       "SELECT batch_id, shipment_batch_id FROM shipment_batches WHERE shipment_id = %s",
+                       "SELECT batch_id, shipment_batch_id, quantity FROM shipment_batches WHERE shipment_id = %s",
                        (shipment_id,))
-            existing = {r[0]: r[1] for r in cursor.fetchall()}
+            old_rows = cursor.fetchall()
+            existing = {r[0]: r[1] for r in old_rows}
+            before['lines'] = {r[0]: float(r[2]) for r in old_rows}
 
             new_lines = {}
             for batch_id, qty in lines.items():
@@ -494,9 +516,10 @@ def update_shipment(shipment_id, destination=_UNSET, notes=_UNSET, category=_UNS
         if not fields and lines is _UNSET:
             return True
 
+        after = dict(fields, **({'lines': new_lines} if lines is not _UNSET else {}))
+        log_action('shipment_updated', None, entity=('shipment', shipment_id),
+                   changes=diff(before, after), db=db, cursor=cursor)
         db.commit()
-        log_action('shipment_updated',
-                   f"shipment_id={shipment_id}, fields={list(fields.keys())}, lines_changed={lines is not _UNSET}")
         return True
 
     except ValueError:
@@ -522,12 +545,14 @@ def delete_shipment(shipment_id):
     cursor = db.cursor()
 
     try:
-        db.execute(cursor, "SELECT shipment_id FROM shipments WHERE shipment_id = %s", (shipment_id,))
-        if not cursor.fetchone():
+        db.execute(cursor, "SELECT shipment_number FROM shipments WHERE shipment_id = %s", (shipment_id,))
+        row = cursor.fetchone()
+        if not row:
             raise ValueError(f"Shipment {shipment_id} not found — nothing deleted.")
 
-        db.execute(cursor, "SELECT DISTINCT batch_id FROM shipment_batches WHERE shipment_id = %s", (shipment_id,))
-        affected = [r[0] for r in cursor.fetchall()]
+        db.execute(cursor, "SELECT batch_id, quantity FROM shipment_batches WHERE shipment_id = %s", (shipment_id,))
+        deleted_lines = {r[0]: float(r[1]) for r in cursor.fetchall()}
+        affected = list(deleted_lines)
 
         db.execute(cursor, "DELETE FROM shipment_batches WHERE shipment_id = %s", (shipment_id,))
         db.execute(cursor, "DELETE FROM shipments WHERE shipment_id = %s", (shipment_id,))
@@ -535,8 +560,9 @@ def delete_shipment(shipment_id):
         for batch_id in affected:
             _recompute_batch_status(cursor, db, batch_id)
 
+        log_action('shipment_deleted', f"number={row[0]}, lines={deleted_lines}",
+                   entity=('shipment', shipment_id), db=db, cursor=cursor)
         db.commit()
-        log_action('shipment_deleted', f"shipment_id={shipment_id}")
         return True
 
     except ValueError:

@@ -3,22 +3,8 @@
 {% block title %}Manage Materials{% endblock %}
 
 {% block content %}
+{% from "_list_controls.html" import qs, sort_select, search_box %}
 
-{# ADDED: sort feature — a single Sort dropdown. Each option's value is the query string for
-   that ordering; selecting one navigates there (resetting to page 1). The matching option is
-   pre-selected from the current `sort`/`direction`. #}
-{% macro sort_box(options) %}
-<label style="display:inline-flex;align-items:center;gap:6px;font-size:14px;color:var(--text-muted);">
-    Sort:
-    <select onchange="if(this.value)location.href=this.value;"
-            class="btn btn-secondary" style="padding:5px 10px;cursor:pointer;">
-        <option value="?page=1" {{ 'selected' if not sort }}>Default</option>
-        {% for label, col, dir in options %}
-        <option value="?sort={{ col }}&dir={{ dir }}&page=1" {{ 'selected' if sort == col and direction == dir }}>{{ label }}</option>
-        {% endfor %}
-    </select>
-</label>
-{% endmacro %}
 
 <div class="page-header">
     <div>
@@ -26,18 +12,22 @@
         <p class="page-subtitle">Edit or remove materials from inventory</p>
     </div>
     <div style="display:flex;gap:10px;align-items:center;">
-        {{ sort_box([
-            ('Name (A–Z)', 'name', 'asc'),
-            ('Name (Z–A)', 'name', 'desc'),
-            ('Category (A–Z)', 'category', 'asc'),
-            ('Category (Z–A)', 'category', 'desc'),
-            ('Stock (Low→High)', 'stock_level', 'asc'),
-            ('Stock (High→Low)', 'stock_level', 'desc'),
-            ('Reorder Level (Low→High)', 'reorder_level', 'asc'),
-            ('Reorder Level (High→Low)', 'reorder_level', 'desc'),
-        ]) }}
         <a href="/add-material" class="btn btn-primary">+ Add Material</a>
     </div>
+</div>
+
+<div class="list-controls">
+    {{ search_box(list_params, 'Material or category…') }}
+    {{ sort_select([
+        ('Name (A–Z)', 'name', 'asc'),
+        ('Name (Z–A)', 'name', 'desc'),
+        ('Category (A–Z)', 'category', 'asc'),
+        ('Category (Z–A)', 'category', 'desc'),
+        ('Stock (Low→High)', 'stock_level', 'asc'),
+        ('Stock (High→Low)', 'stock_level', 'desc'),
+        ('Reorder Level (Low→High)', 'reorder_level', 'asc'),
+        ('Reorder Level (High→Low)', 'reorder_level', 'desc'),
+    ], list_params) }}
 </div>
 
 {# REMOVED: was request.args.get('warning') URL-param message — now handled by flash() in base.html #}
@@ -70,13 +60,13 @@
                 {# ADDED: organic feature — each badge is a one-click POST that flips the flag,
                    preserving the current page. #}
                 <td>
-                    <form method="post" action="/material/{{ row.material_id | int }}/toggle/is_edible?page={{ page }}" style="margin:0;">
+                    <form method="post" action="/material/{{ row.material_id | int }}/toggle/is_edible{{ qs(list_params, {'page': page}) }}" style="margin:0;">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <button type="submit" class="badge {{ 'badge-on' if row.is_edible else 'badge-off' }}" style="cursor:pointer;">{{ 'Yes' if row.is_edible else 'No' }}</button>
                     </form>
                 </td>
                 <td>
-                    <form method="post" action="/material/{{ row.material_id | int }}/toggle/is_organic?page={{ page }}" style="margin:0;">
+                    <form method="post" action="/material/{{ row.material_id | int }}/toggle/is_organic{{ qs(list_params, {'page': page}) }}" style="margin:0;">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <button type="submit" class="badge {{ 'badge-on' if row.is_organic else 'badge-off' }}" style="cursor:pointer;">{{ 'Organic' if row.is_organic else 'No' }}</button>
                     </form>
@@ -97,23 +87,21 @@
 </div>
 {% else %}
 <div class="table-container" style="padding:40px 24px;text-align:center;color:var(--text-muted);">
-    <p>No materials found. <a href="/add-material" style="color:var(--accent);">Add your first material</a></p>
+    {% if list_params.q %}<p>No materials match &ldquo;{{ list_params.q }}&rdquo;.</p>{% else %}<p>No materials found. <a href="/add-material" style="color:var(--accent);">Add your first material</a></p>{% endif %}
 </div>
 {% endif %}
 
 {# ADDED: pagination controls — only shown when there is more than one page #}
 {% if total_pages > 1 %}
-{# ADDED: sort feature — preserve the active sort across page navigation. #}
-{% set sort_qs = ('&sort=' ~ sort ~ '&dir=' ~ direction) if sort else '' %}
 <nav style="display:flex;align-items:center;gap:12px;margin-top:24px;font-size:14px;">
     {% if page > 1 %}
-        <a href="?page={{ page - 1 }}{{ sort_qs }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
+        <a href="{{ qs(list_params, {'page': page - 1}) }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
     {% else %}
         <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">&#8592; Prev</span>
     {% endif %}
     <span style="color:var(--text-muted);">Page {{ page }} of {{ total_pages }} &mdash; {{ total }} material(s)</span>
     {% if page < total_pages %}
-        <a href="?page={{ page + 1 }}{{ sort_qs }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
+        <a href="{{ qs(list_params, {'page': page + 1}) }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
     {% else %}
         <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">Next &#8594;</span>
     {% endif %}
