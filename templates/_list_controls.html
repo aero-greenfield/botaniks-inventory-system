@@ -30,11 +30,13 @@
 {% endmacro %}
 
 {# Search box. Submits ?q= and carries the current sort/filter as hidden fields. #}
-{% macro search_box(params, placeholder='Search…') %}
+{% macro search_box(params, placeholder='Search…', tab_field=False) %}
 <form method="get" class="list-control list-search" role="search">
     {% for k, v in params.items() if v and k != 'q' %}
     <input type="hidden" name="{{ k }}" value="{{ v }}">
     {% endfor %}
+    {# Batches only: switchTab() fills this so a search keeps the open tab. #}
+    {% if tab_field %}<input type="hidden" name="tab" id="search-tab" value="{{ request.args.get('tab', '') }}">{% endif %}
     <input type="search" name="q" value="{{ params.get('q') or '' }}" placeholder="{{ placeholder }}"
            aria-label="{{ placeholder }}" maxlength="100">
     <button type="submit" class="btn btn-secondary">Search</button>

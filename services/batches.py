@@ -530,12 +530,16 @@ def add_to_batches(product_name, quantity, notes=None, batch_number=None, deduct
         db.close()
 
 
-# sort/search feature — whitelists (URL key → SQL) for the batch list pages. `remaining` and
-# `batch_cost` are SELECT aliases, which ORDER BY may name directly on both databases.
+# sort/search feature — whitelists (URL key → SQL) for the batch list pages. A bare SELECT alias
+# (`batch_cost`) may be named directly in ORDER BY on both databases, but not inside an expression.
 _READY_SORT_COLS = {
     "date": "date_completed",
     "product": "product_name",
-    "available": "remaining",
+    # Sort by the number the row shows: a Component shows what is left of its output lot, other
+    # rows show produced minus shipped. Written out in full — PostgreSQL can't use the SELECT
+    # aliases (mix_remaining, remaining) inside an expression.
+    "available": "COALESCE((SELECT quantity FROM raw_material_lots WHERE raw_material_lots.lot_id = batches.mix_lot_id), "
+                 "batches.quantity - (SELECT COALESCE(SUM(sb.quantity), 0) FROM shipment_batches sb WHERE sb.batch_id = batches.batch_id))",
     "cost": "batch_cost",
     "batch_number": "batch_number",
 }

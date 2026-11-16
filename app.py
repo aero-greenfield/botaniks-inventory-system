@@ -441,12 +441,14 @@ MAX_PAGE = 10_000
 
 
 def _list_args(default_sort=None, default_dir='asc'):
-    """sort/search feature — (sort, dir, q) for a list page. `sort` is only used as a whitelist key
+    """sort/search feature — (sort, dir, q, list_params) for a list page. `sort` is only used as a whitelist key
     and `q` only as a bound param inside the services, so trimming/capping is all that's needed here."""
     sort = request.args.get('sort') or default_sort
     direction = 'desc' if (request.args.get('dir') or default_dir) == 'desc' else 'asc'
     q = request.args.get('q', '').strip()[:100]
-    return sort, direction, q
+    # The template's view of the same state (dir only when a sort is active).
+    list_params = {'sort': sort, 'dir': direction if sort else '', 'q': q}
+    return sort, direction, q, list_params
 
 
 
@@ -566,7 +568,7 @@ def view_inventory():
     page = min(max(1, int(request.args.get('page', 1))), MAX_PAGE)  # CHANGED: capped at MAX_PAGE to prevent large-OFFSET DoS
 
     # ADDED: sort feature — column + direction from URL (validated/whitelisted in the service)
-    sort, direction, q = _list_args()
+    sort, direction, q, list_params = _list_args()
 
     # CHANGED: default the materials page to stock high->low when the user hasn't picked a sort.
     #          `sort`/`direction` stay None/asc so the Sort dropdown still shows "Default"; only
@@ -611,7 +613,7 @@ def view_inventory():
         offset_housemade=offset_housemade,
         total_pages=total_pages,
         total=total,
-        list_params={'sort': sort, 'dir': direction if sort else '', 'q': q},
+        list_params=list_params,
         back_link=True,
         back_link_url="/",
         back_link_label="Back to Home"
@@ -1041,7 +1043,7 @@ def manage_materials():
     page = min(max(1, int(request.args.get('page', 1))), MAX_PAGE)  # CHANGED: capped at MAX_PAGE to prevent large-OFFSET DoS
 
     # ADDED: sort feature — column + direction from URL (validated/whitelisted in the service)
-    sort, direction, q = _list_args()
+    sort, direction, q, list_params = _list_args()
 
     # CHANGED: get_all_materials now returns (df, total) tuple
     df, total = get_all_materials(page=page, per_page=PER_PAGE, sort_by=sort, sort_dir=direction, q=q)
@@ -1056,7 +1058,7 @@ def manage_materials():
         page=page,
         total_pages=total_pages,
         total=total,
-        list_params={'sort': sort, 'dir': direction if sort else '', 'q': q},
+        list_params=list_params,
         back_link=True,
         back_link_url="/",
         back_link_label="Back to Home"
@@ -1746,7 +1748,7 @@ def manage_batches():
     page = min(max(1, int(request.args.get('page', 1))), MAX_PAGE)  # CHANGED: capped at MAX_PAGE to prevent large-OFFSET DoS
 
     # CHANGED: get_all_batches_with_id now returns (df, total) tuple
-    sort, direction, q = _list_args(default_dir='desc')
+    sort, direction, q, list_params = _list_args(default_dir='desc')
     df, total = get_all_batches_with_id(page=page, per_page=PER_PAGE, sort_by=sort, sort_dir=direction, q=q)
 
     batches = df.to_dict(orient='records') if (df is not None and not df.empty) else []
@@ -1759,7 +1761,7 @@ def manage_batches():
         page=page,
         total_pages=total_pages,
         total=total,
-        list_params={'sort': sort, 'dir': direction if sort else '', 'q': q},
+        list_params=list_params,
         back_link=True,
         back_link_url="/",
         back_link_label="Back to Home"
@@ -2186,8 +2188,8 @@ def view_recipes():
 
     # CHANGED: get_all_recipes now returns (df, total). Pagination is at the recipe level
     #          (never splits a recipe across pages). total = total number of distinct recipes.
-    sort, direction, q = _list_args()
-    list_params = {'sort': sort, 'dir': direction if sort else '', 'q': q, 'kind': '' if kind == 'all' else kind}
+    sort, direction, q, list_params = _list_args()
+    list_params['kind'] = '' if kind == 'all' else kind
     df, total = get_all_recipes(page=page, per_page=PER_PAGE, sort_by=sort, sort_dir=direction, q=q)
 
     if df.empty:
@@ -2534,7 +2536,7 @@ def manage_recipes():
     page = min(max(1, int(request.args.get('page', 1))), MAX_PAGE)  # CHANGED: capped at MAX_PAGE to prevent large-OFFSET DoS
 
     # CHANGED: get_all_recipes_with_id now returns (df, total) tuple
-    sort, direction, q = _list_args()
+    sort, direction, q, list_params = _list_args()
     df, total = get_all_recipes_with_id(page=page, per_page=PER_PAGE, sort_by=sort, sort_dir=direction, q=q)
 
     recipes = df.to_dict(orient='records') if (df is not None and not df.empty) else []
@@ -2547,7 +2549,7 @@ def manage_recipes():
         page=page,
         total_pages=total_pages,
         total=total,
-        list_params={'sort': sort, 'dir': direction if sort else '', 'q': q},
+        list_params=list_params,
         back_link=True,
         back_link_url="/",
         back_link_label="Back to Home"
@@ -2790,7 +2792,7 @@ def manage_lots():
     page = min(max(1, int(request.args.get('page', 1))), MAX_PAGE)  # CHANGED: capped at MAX_PAGE to prevent large-OFFSET DoS
 
     # CHANGED: get_all_lots now returns (df, total) tuple
-    sort, direction, q = _list_args(default_sort='received', default_dir='desc')
+    sort, direction, q, list_params = _list_args(default_sort='received', default_dir='desc')
     df, total = get_all_lots(page=page, per_page=PER_PAGE, sort_by=sort, sort_dir=direction, q=q)
 
     lots = df.to_dict(orient='records') if (df is not None and not df.empty) else []
@@ -2803,7 +2805,7 @@ def manage_lots():
         page=page,
         total_pages=total_pages,
         total=total,
-        list_params={'sort': sort, 'dir': direction, 'q': q},
+        list_params=list_params,
         back_link=True,
         back_link_url="/",
         back_link_label="Back to Home"
@@ -3090,9 +3092,9 @@ def delete_lot_route(lot_id):
 @app.route('/shipments')
 @requires_auth
 def shipments_list():
-    page = request.args.get('page', 1, type=int)
+    page = min(max(1, request.args.get('page', 1, type=int)), MAX_PAGE)
     per_page = 50
-    sort, direction, q = _list_args(default_dir='desc')
+    sort, direction, q, list_params = _list_args(default_dir='desc')
     df, total = get_all_shipments(page=page, per_page=per_page, sort_by=sort, sort_dir=direction, q=q)
     total_pages = math.ceil(total / per_page) if total else 1
     shipments = df.to_dict('records') if not df.empty else []
@@ -3103,7 +3105,7 @@ def shipments_list():
         page=page,
         total_pages=total_pages,
         total=total or 0,
-        list_params={'sort': sort, 'dir': direction if sort else '', 'q': q},
+        list_params=list_params,
     )
 
 
@@ -3203,11 +3205,11 @@ def create_shipment_route():
 @app.route('/manage-shipments')
 @requires_auth
 def manage_shipments():
-    sort, direction, q = _list_args(default_dir='desc')
+    sort, direction, q, list_params = _list_args(default_dir='desc')
     df, _ = get_all_shipments(page=None, sort_by=sort, sort_dir=direction, q=q)
     shipments = df.to_dict('records') if not df.empty else []
     return render_template('manage_shipments.html', shipments=shipments,
-        list_params={'sort': sort, 'dir': direction if sort else '', 'q': q})
+        list_params=list_params)
 
 
 @app.route('/edit-shipment/<int:shipment_id>')

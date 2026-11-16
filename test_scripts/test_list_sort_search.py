@@ -165,3 +165,31 @@ def test_search_shows_no_match_message_and_keeps_query_in_box(client, auth, db):
     html = client.get("/manage-batches?q=zzz", headers=auth).get_data(as_text=True)
     assert "No batches match" in html
     assert 'value="zzz"' in html
+
+
+# --- review fixes ----------------------------------------------------------------------
+def test_available_sort_follows_the_component_leftover_shown(db, make_material, make_lot):
+    # Component rows show what's left of their output lot, so "Available" must sort by that,
+    # not by produced quantity. Big produced 100 but has 5 left; Small produced 10, all left.
+    mid = make_material("House Mix", is_housemade=True)
+    big_lot = make_lot(mid, 5)
+    small_lot = make_lot(mid, 10)
+    cur = db.cursor()
+    for name, qty, lot in (("Big", 100, big_lot), ("Small", 10, small_lot)):
+        db.execute(cur, """INSERT INTO batches (product_name, quantity, status, batch_number, batch_type,
+                                                date_completed, mix_lot_id)
+                           VALUES (%s, %s, 'Ready', %s, 'mix', '2024-01-01', %s)""", (name, qty, name, lot))
+    db.commit()
+    df, _ = get_batches(page=1, per_page=50, sort="asc", sort_by="available")
+    assert list(df["product_name"]) == ["Big", "Small"]
+
+
+def test_batches_search_form_carries_the_open_tab(client, auth):
+    html = client.get("/batches?tab=planned", headers=auth).get_data(as_text=True)
+    assert 'id="search-tab" value="planned"' in html
+
+
+def test_shipments_page_zero_is_page_one(client, auth, db):
+    _shipment(db, "SH-1", "Tokyo", "2024-01-01")
+    html = client.get("/shipments?page=0", headers=auth).get_data(as_text=True)
+    assert "SH-1" in html

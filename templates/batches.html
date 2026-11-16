@@ -88,7 +88,7 @@
 </div>
 
 <div class="list-controls">
-    {{ search_box(list_params, 'Batch # or product…') }}
+    {{ search_box(list_params, 'Batch # or product…', tab_field=True) }}
 </div>
 
 {# ── Status tab bar ───────────────────────────── #}
@@ -411,6 +411,9 @@ function switchTab(name) {
     document.querySelectorAll('.tab-bar .tab[id]').forEach(function(t) { t.classList.remove('active'); });
     document.getElementById('panel-' + name).classList.add('active');
     document.getElementById('tab-' + name).classList.add('active');
+    // sort/search feature — a search submitted from this tab reopens on this tab.
+    var tabField = document.getElementById('search-tab');
+    if (tabField) tabField.value = name;
 }
 
 // Honor ?tab= param from URL (e.g. coming from shipped page)
