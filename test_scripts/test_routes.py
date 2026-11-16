@@ -824,7 +824,7 @@ def test_create_shipment_saves_buyer_and_contact(client, auth, db):
     assert len(get_contacts()) == 1
 
 
-def test_shipping_contacts_pages(client, auth):
+def test_shipping_contacts_pages(client, auth, db):
     from services.contacts import get_contacts
     resp = client.post("/shipping-contacts/create", data={"name": "Acme", "contact_info": "x"}, headers=auth)
     assert resp.status_code == 302
@@ -836,4 +836,9 @@ def test_shipping_contacts_pages(client, auth):
     assert get_contacts()[0]["name"] == "Acme Co"
     client.post(f"/shipping-contacts/{cid}/delete", headers=auth)
     assert get_contacts() == []
-    assert b"contact-picker" in client.get("/shipments/new", headers=auth).data
+    # the picker only renders inside the form, which needs a shippable batch
+    _ready_batch(db)
+    create_contact_resp = client.post("/shipping-contacts/create", data={"name": "Beta"}, headers=auth)
+    assert create_contact_resp.status_code == 302
+    page = client.get("/shipments/new", headers=auth).data
+    assert b'id="contact-picker"' in page and b'data-name="Beta"' in page

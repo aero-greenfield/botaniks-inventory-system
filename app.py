@@ -3216,6 +3216,8 @@ def create_shipment_route():
             flash(f"Saved '{buyer['buyer_name']}' as a shipping contact", 'success')
         except ValueError as e:
             flash(f"Contact not saved: {e}", 'warning')
+    elif request.form.get('save_contact'):
+        flash("Contact not saved: buyer name is empty", 'warning')
 
     return redirect(url_for('shipment_detail', shipment_id=shipment_id))
 
