@@ -1,6 +1,8 @@
 """sort/search feature — the shared order_by/search_where helpers, each list service's sort keys
 and ?q= filter (rows AND the pagination total), and that every list page survives junk input."""
 
+import re
+
 import pytest
 
 from services import order_by, search_where
@@ -193,3 +195,39 @@ def test_shipments_page_zero_is_page_one(client, auth, db):
     _shipment(db, "SH-1", "Tokyo", "2024-01-01")
     html = client.get("/shipments?page=0", headers=auth).get_data(as_text=True)
     assert "SH-1" in html
+
+
+# --- Manage Lots "Show" filter (active / inactive / all) --------------------------------
+def _active_and_inactive_lot(db, make_material, make_lot):
+    mid = make_material("Matcha")
+    make_lot(mid, 100, lot_number="L-ACTIVE")
+    gone = make_lot(mid, 100, lot_number="L-USED-UP")
+    cur = db.cursor()
+    db.execute(cur, "UPDATE raw_material_lots SET quantity = 0, status = 'inactive' WHERE lot_id = %s", (gone,))
+    db.commit()
+
+
+def test_lots_status_filter_rows_and_total(db, make_material, make_lot):
+    _active_and_inactive_lot(db, make_material, make_lot)
+    df, total = get_all_lots(page=1, per_page=50, status="active")
+    assert list(df["lot_number"]) == ["L-ACTIVE"] and total == 1
+    df, total = get_all_lots(page=1, per_page=50, status="inactive")
+    assert list(df["lot_number"]) == ["L-USED-UP"] and total == 1
+    _, total = get_all_lots(page=1, per_page=50, status=None)
+    assert total == 2
+
+
+@pytest.mark.parametrize("qs, shown, hidden, selected", [
+    ("", ["L-ACTIVE"], ["L-USED-UP"], "Active only"),           # default: active only
+    ("?show=all", ["L-ACTIVE", "L-USED-UP"], [], "All lots"),
+    ("?show=inactive", ["L-USED-UP"], ["L-ACTIVE"], "Inactive only"),
+    ("?show=bogus", ["L-ACTIVE"], ["L-USED-UP"], "Active only"),  # junk falls back to active
+])
+def test_manage_lots_show_filter(client, auth, db, make_material, make_lot, qs, shown, hidden, selected):
+    _active_and_inactive_lot(db, make_material, make_lot)
+    html = client.get("/manage-lots" + qs, headers=auth).get_data(as_text=True)
+    for lot in shown:
+        assert lot in html
+    for lot in hidden:
+        assert lot not in html
+    assert re.search(r"<option[^>]*selected[^>]*>" + selected + "</option>", html)

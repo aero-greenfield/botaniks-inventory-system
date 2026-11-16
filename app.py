@@ -2793,7 +2793,11 @@ def manage_lots():
 
     # CHANGED: get_all_lots now returns (df, total) tuple
     sort, direction, q, list_params = _list_args(default_sort='received', default_dir='desc')
-    df, total = get_all_lots(page=page, per_page=PER_PAGE, sort_by=sort, sort_dir=direction, q=q)
+    # Show filter — active lots by default; 'all' is explicit so links can carry it.
+    show = request.args.get('show') if request.args.get('show') in ('active', 'inactive', 'all') else 'active'
+    list_params['show'] = show
+    df, total = get_all_lots(page=page, per_page=PER_PAGE, sort_by=sort, sort_dir=direction, q=q,
+                             status=None if show == 'all' else show)
 
     lots = df.to_dict(orient='records') if (df is not None and not df.empty) else []
     # ADDED: total_pages for pagination controls in template
