@@ -11,6 +11,14 @@ from config import business_now  # lot-expiration check in check_negative_stock 
 #        dimension from the recipe's declared product_dimension, falling back to inferring it
 #        from the product_unit text (same fallback _create_housemade_lot in batches.py uses).
 from services import units
+from services import order_by, search_where
+
+# sort/search feature — whitelist (URL key → SQL) for the recipe list pages.
+_RECIPE_SORT_COLS = {
+    "name": "r.product_name",
+    "added": "r.recipe_id",
+    "type": "r.batch_type",
+}
 
 # ADDED: get_raw_material lives in services.materials. recipes.py calls it inside
 #        add_recipe, change_recipe, update_recipe, and check_negative_stock to
@@ -230,7 +238,7 @@ def check_negative_stock(product_name, quantity):
     return negative
 
 
-def get_all_recipes(page=None, per_page=50):
+def get_all_recipes(page=None, per_page=50, sort_by=None, sort_dir='asc', q=None):
     """
     Returns all recipes and their materials as a DataFrame.
 
@@ -279,12 +287,17 @@ def get_all_recipes(page=None, per_page=50):
             return (pd.DataFrame(result, columns=columns), None)
 
         # ADDED: total distinct recipe count for pagination metadata
-        db.execute(cursor, "SELECT COUNT(*) FROM recipes")
+        # sort/search feature — same WHERE on the count so page numbers match the filtered list.
+        where, where_params = search_where(["r.product_name"], q)
+        where_sql = f"WHERE {where}" if where else ""
+        order_clause = order_by(_RECIPE_SORT_COLS, sort_by, sort_dir, "r.product_name ASC", "r.recipe_id DESC")
+        db.execute(cursor, f"SELECT COUNT(*) FROM recipes r {where_sql}", where_params or None)
         total = cursor.fetchone()[0]
 
         # ADDED: paginate at the recipe level using a subquery so no recipe is split across pages.
         #        Inner SELECT gets the recipe_ids for this page; outer JOIN fetches all their ingredients.
-        paginated_query = """
+        # Inner and outer ORDER BY must match, or the page's recipes come back reshuffled.
+        paginated_query = f"""
         SELECT r.product_name AS recipe_product_name, r.notes, r.product_unit, r.batch_type,
                raw.name AS material_name, rm.quantity_needed AS quantity,
                -- CHANGED: units-conversion-layer feature — show the unit the line was entered
@@ -295,11 +308,11 @@ def get_all_recipes(page=None, per_page=50):
         LEFT JOIN recipe_materials rm ON r.recipe_id = rm.recipe_id
         LEFT JOIN raw_materials raw ON rm.material_id = raw.material_id
         WHERE r.recipe_id IN (
-            SELECT recipe_id FROM recipes ORDER BY product_name ASC LIMIT %s OFFSET %s
+            SELECT r.recipe_id FROM recipes r {where_sql} {order_clause} LIMIT %s OFFSET %s
         )
-        ORDER BY r.product_name ASC, raw.name ASC
+        {order_clause}, raw.name ASC
         """
-        db.execute(cursor, paginated_query, (per_page, (page - 1) * per_page))
+        db.execute(cursor, paginated_query, where_params + (per_page, (page - 1) * per_page))
         result = cursor.fetchall()
         return (pd.DataFrame(result, columns=columns), total)
 
@@ -404,7 +417,7 @@ def add_recipe(product_name, materials, notes=None, product_unit=None, product_d
 
 
 
-def get_all_recipes_with_id(page=None, per_page=50):
+def get_all_recipes_with_id(page=None, per_page=50, sort_by=None, sort_dir='asc', q=None):
     """
     returns all recipes with their recipe_id,
     used for manage page when editing recipe,
@@ -427,24 +440,28 @@ def get_all_recipes_with_id(page=None, per_page=50):
         # CHANGED: dropped the INNER JOINs to recipe_materials/raw_materials. They excluded
         #          recipes with no valid materials, which meant a broken recipe couldn't be
         #          listed here to be edited or deleted. The manage page needs EVERY recipe.
-        base_query = """
+        where, where_params = search_where(["r.product_name"], q)
+        where_sql = f"WHERE {where}" if where else ""
+        order_clause = order_by(_RECIPE_SORT_COLS, sort_by, sort_dir, "r.product_name ASC", "r.recipe_id DESC")
+        base_query = f"""
         SELECT r.recipe_id, r.product_name, r.notes, r.batch_type
         FROM recipes r
-        ORDER BY r.product_name ASC
+        {where_sql}
+        {order_clause}
         """
 
         if page is None:
             # ADDED: full table path — no LIMIT/OFFSET
-            db.execute(cursor, base_query)
+            db.execute(cursor, base_query, where_params or None)
             result = cursor.fetchall()
             return (pd.DataFrame(result, columns=columns), None)
 
         # ADDED: total distinct recipe count for pagination metadata
-        db.execute(cursor, "SELECT COUNT(*) FROM recipes")
+        db.execute(cursor, f"SELECT COUNT(*) FROM recipes r {where_sql}", where_params or None)
         total = cursor.fetchone()[0]
 
         # ADDED: LIMIT/OFFSET for the requested page
-        db.execute(cursor, base_query + " LIMIT %s OFFSET %s", (per_page, (page - 1) * per_page))
+        db.execute(cursor, base_query + " LIMIT %s OFFSET %s", where_params + (per_page, (page - 1) * per_page))
         result = cursor.fetchall()
         return (pd.DataFrame(result, columns=columns), total)
 

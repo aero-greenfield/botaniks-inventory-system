@@ -1,0 +1,45 @@
+{# sort/search feature — shared list controls for every list page.
+   `params` is the page's current query state (sort, dir, q, kind, ...) without `page`. Every link
+   is built from it, so changing one control keeps the others (and resets to page 1).
+   Import with: {% from "_list_controls.html" import qs, sort_select, search_box %} #}
+
+{# Query string for `params` with `overrides` applied. A blank override removes that key. #}
+{% macro qs(params, overrides={}) -%}
+{%- set p = {} -%}
+{%- for k, v in params.items() if v -%}{%- set _ = p.update({k: v}) -%}{%- endfor -%}
+{%- for k, v in overrides.items() -%}
+    {%- if v -%}{%- set _ = p.update({k: v}) -%}{%- elif k in p -%}{%- set _ = p.pop(k) -%}{%- endif -%}
+{%- endfor -%}
+?{{ p | urlencode }}
+{%- endmacro %}
+
+{# Sort dropdown. options = [(label, col, dir), ...]. include_default=False on pages whose route
+   fills in a default sort itself (so that option already shows as selected). #}
+{% macro sort_select(options, params, col_key='sort', dir_key='dir', include_default=True) %}
+<label class="list-control">
+    Sort:
+    <select onchange="if(this.value)location.href=this.value;" class="btn btn-secondary">
+        {% if include_default %}
+        <option value="{{ qs(params, {col_key: '', dir_key: ''}) }}" {{ 'selected' if not params.get(col_key) }}>Default</option>
+        {% endif %}
+        {% for label, col, dir in options %}
+        <option value="{{ qs(params, {col_key: col, dir_key: dir}) }}" {{ 'selected' if params.get(col_key) == col and params.get(dir_key) == dir }}>{{ label }}</option>
+        {% endfor %}
+    </select>
+</label>
+{% endmacro %}
+
+{# Search box. Submits ?q= and carries the current sort/filter as hidden fields. #}
+{% macro search_box(params, placeholder='Search…') %}
+<form method="get" class="list-control list-search" role="search">
+    {% for k, v in params.items() if v and k != 'q' %}
+    <input type="hidden" name="{{ k }}" value="{{ v }}">
+    {% endfor %}
+    <input type="search" name="q" value="{{ params.get('q') or '' }}" placeholder="{{ placeholder }}"
+           aria-label="{{ placeholder }}" maxlength="100">
+    <button type="submit" class="btn btn-secondary">Search</button>
+    {% if params.get('q') %}
+    <a href="{{ qs(params, {'q': ''}) }}" class="btn btn-ghost">Clear</a>
+    {% endif %}
+</form>
+{% endmacro %}

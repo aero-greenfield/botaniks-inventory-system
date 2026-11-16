@@ -5,6 +5,7 @@ from datetime import datetime
 from config import business_today
 import logging
 import pandas as pd
+from services import order_by, search_where
 
 _UNSET = object()
 _EPS = 1e-9  # float tolerance when comparing allocated REAL quantities against a batch total
@@ -160,35 +161,50 @@ def create_shipment(lines, destination=None, notes=None, category=None, date_shi
         db.close()
 
 
-def get_all_shipments(page=None, per_page=50):
+# sort/search feature — whitelist (URL key → SQL) for the shipments list pages.
+_SHIPMENT_SORT_COLS = {
+    "date": "s.date_shipped IS NULL, s.date_shipped",
+    "shipment_number": "s.shipment_number",
+    "destination": "s.destination IS NULL, s.destination",
+    "category": "s.category IS NULL, s.category",
+    "batches": "batch_count",
+}
+
+
+def get_all_shipments(page=None, per_page=50, sort_by=None, sort_dir='desc', q=None):
     """
     Returns (DataFrame, total) of all shipments with the number of batch lines on each.
     page=None returns all records without LIMIT (used by /manage-shipments).
+    sort_by = a _SHIPMENT_SORT_COLS key; q = shipment # / destination / category search.
     """
     db = get_db_connection()
     cursor = db.cursor()
+    order_clause = order_by(_SHIPMENT_SORT_COLS, sort_by, sort_dir, "s.shipment_id DESC", "s.shipment_id DESC")
+    where, where_params = search_where(["s.shipment_number", "s.destination", "s.category"], q)
+    where_sql = f"WHERE {where}" if where else ""
 
     columns = ['shipment_id', 'shipment_number', 'date_shipped', 'destination', 'notes', 'category', 'batch_count']
-    base_query = """
+    base_query = f"""
     SELECT s.shipment_id, s.shipment_number, s.date_shipped, s.destination, s.notes, s.category,
            COUNT(sb.shipment_batch_id) AS batch_count
     FROM shipments s
     LEFT JOIN shipment_batches sb ON sb.shipment_id = s.shipment_id
+    {where_sql}
     GROUP BY s.shipment_id, s.shipment_number, s.date_shipped, s.destination, s.notes, s.category
-    ORDER BY s.shipment_id DESC
+    {order_clause}
     """
 
     try:
         if page is None:
-            db.execute(cursor, base_query)
+            db.execute(cursor, base_query, where_params or None)
             result = cursor.fetchall()
             return (pd.DataFrame(result, columns=columns), None)
 
-        db.execute(cursor, "SELECT COUNT(*) FROM shipments")
+        db.execute(cursor, f"SELECT COUNT(*) FROM shipments s {where_sql}", where_params or None)
         total = cursor.fetchone()[0]
 
         offset = (page - 1) * per_page
-        db.execute(cursor, base_query + " LIMIT %s OFFSET %s", (per_page, offset))
+        db.execute(cursor, base_query + " LIMIT %s OFFSET %s", where_params + (per_page, offset))
         result = cursor.fetchall()
         return (pd.DataFrame(result, columns=columns), total)
 

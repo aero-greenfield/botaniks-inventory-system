@@ -3,6 +3,7 @@
 {% block title %}Manage Recipes{% endblock %}
 
 {% block content %}
+{% from "_list_controls.html" import qs, sort_select, search_box %}
 
 <div class="page-header">
     <div>
@@ -10,6 +11,17 @@
         <p class="page-subtitle">Edit or remove recipes</p>
     </div>
     <a href="/add-recipe" class="btn btn-primary">+ Add Recipe</a>
+</div>
+
+<div class="list-controls">
+    {{ search_box(list_params, 'Recipe name…') }}
+    {{ sort_select([
+        ('Name (A–Z)', 'name', 'asc'),
+        ('Name (Z–A)', 'name', 'desc'),
+        ('Newest Added', 'added', 'desc'),
+        ('Oldest Added', 'added', 'asc'),
+        ('Type (A–Z)', 'type', 'asc'),
+    ], list_params) }}
 </div>
 
 {% if recipes %}
@@ -48,7 +60,11 @@
 </div>
 {% else %}
 <div class="table-container" style="padding:40px 24px;text-align:center;color:var(--text-muted);">
+    {% if list_params.q %}
+    <p>No recipes match &ldquo;{{ list_params.q }}&rdquo;.</p>
+    {% else %}
     <p>No recipes found. <a href="/add-recipe" style="color:var(--accent);">Add your first recipe</a></p>
+    {% endif %}
 </div>
 {% endif %}
 
@@ -56,13 +72,13 @@
 {% if total_pages > 1 %}
 <nav style="display:flex;align-items:center;gap:12px;margin-top:24px;font-size:14px;">
     {% if page > 1 %}
-        <a href="?page={{ page - 1 }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
+        <a href="{{ qs(list_params, {'page': page - 1}) }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
     {% else %}
         <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">&#8592; Prev</span>
     {% endif %}
     <span style="color:var(--text-muted);">Page {{ page }} of {{ total_pages }} &mdash; {{ total }} recipe(s)</span>
     {% if page < total_pages %}
-        <a href="?page={{ page + 1 }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
+        <a href="{{ qs(list_params, {'page': page + 1}) }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
     {% else %}
         <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">Next &#8594;</span>
     {% endif %}

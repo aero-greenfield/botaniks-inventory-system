@@ -77,11 +77,16 @@ def _seed_shipped(db):
     db.commit()
 
 
-@pytest.mark.parametrize("url", ["/batches", "/batches?ready_sort=asc&planned_sort=desc"])
-def test_batches_sort_header_renders(client, auth, db, url):
+# sort/search feature — /batches now sorts via a per-tab dropdown (was a date-header link).
+@pytest.mark.parametrize("url, selected", [
+    ("/batches", "Completed (Newest)"),
+    ("/batches?ready_sort=asc&planned_sort=desc", "Completed (Oldest)"),
+    ("/batches?ready_by=product&ready_sort=asc", "Product (A–Z)"),
+])
+def test_batches_sort_dropdown_renders(client, auth, db, url, selected):
     _seed_ready(db)
     html = client.get(url, headers=auth).get_data(as_text=True)
-    assert "sort-link" in html
+    assert re.search(r"<option[^>]*selected[^>]*>" + re.escape(selected) + "</option>", html)
 
 
 @pytest.mark.parametrize("url", ["/shipped-batches", "/shipped-batches?sort=asc"])

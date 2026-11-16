@@ -3,6 +3,7 @@
 from database import get_db_connection
 import pandas as pd
 import logging
+from services import order_by, search_where
 from config import business_today  # lot-expiration checks — see config.py
 
 
@@ -66,7 +67,7 @@ _MATERIAL_SORT_COLS = {
 }
 
 
-def get_all_materials(page=None, per_page=50, sort_by=None, sort_dir='asc'):
+def get_all_materials(page=None, per_page=50, sort_by=None, sort_dir='asc', q=None):
     """
     Returns all materials. Stock is derived from SUM of active lot quantities.
 
@@ -91,11 +92,10 @@ def get_all_materials(page=None, per_page=50, sort_by=None, sort_dir='asc'):
         # ADDED: sort feature — build the ORDER BY clause from the whitelist. A valid sort_by
         #        sorts by that column with rm.name as a stable tiebreaker; otherwise keep the
         #        original default order.
-        if sort_by in _MATERIAL_SORT_COLS:
-            direction = 'DESC' if str(sort_dir).lower() == 'desc' else 'ASC'
-            order_clause = f"ORDER BY {_MATERIAL_SORT_COLS[sort_by]} {direction}, rm.name ASC"
-        else:
-            order_clause = "ORDER BY category, name"
+        order_clause = order_by(_MATERIAL_SORT_COLS, sort_by, sort_dir, "category, name", "rm.name ASC")
+        # search feature — optional name/category filter; applied to the COUNT below too.
+        where, where_params = search_where(["rm.name", "rm.category"], q)
+        where_sql = f"WHERE {where}" if where else ""
 
         # does not include expired lots in the stock quantity
         # ADDED: cost-of-material feature — total_cost aggregates quantity * cost_per_unit for active, non-expired lots.
@@ -114,6 +114,7 @@ def get_all_materials(page=None, per_page=50, sort_by=None, sort_dir='asc'):
                rm.unit, rm.reorder_level, rm.is_housemade, rm.is_edible, rm.is_organic
         FROM raw_materials rm
         LEFT JOIN raw_material_lots rm_lot ON rm.material_id = rm_lot.material_id
+        {where_sql}
         GROUP BY rm.material_id
         {order_clause}
         """
@@ -121,17 +122,17 @@ def get_all_materials(page=None, per_page=50, sort_by=None, sort_dir='asc'):
         if page is None:
             # ADDED: page=None → return full table without LIMIT (exports, create-batch)
             # CHANGED: cost-of-material feature — pass now twice (stock_level and total_cost both use the date filter).
-            db.execute(cursor, base_query, (now, now))
+            db.execute(cursor, base_query, (now, now) + where_params)
             result = cursor.fetchall()
             return (pd.DataFrame(result, columns=columns), None)
 
         # ADDED: get total row count for pagination metadata (one count per material, not per lot)
-        db.execute(cursor, "SELECT COUNT(DISTINCT material_id) FROM raw_materials")
+        db.execute(cursor, f"SELECT COUNT(DISTINCT rm.material_id) FROM raw_materials rm {where_sql}", where_params or None)
         total = cursor.fetchone()[0]
 
         # ADDED: append LIMIT/OFFSET for the requested page
         # CHANGED: cost-of-material feature — pass now twice before LIMIT/OFFSET params.
-        db.execute(cursor, base_query + " LIMIT %s OFFSET %s", (now, now, per_page, (page - 1) * per_page))
+        db.execute(cursor, base_query + " LIMIT %s OFFSET %s", (now, now) + where_params + (per_page, (page - 1) * per_page))
         result = cursor.fetchall()
         return (pd.DataFrame(result, columns=columns), total)
 

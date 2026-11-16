@@ -25,6 +25,7 @@ from services.shipments import _recompute_batch_status
 #        display unit/dimension from the recipe's product_unit and store the produced lot
 #        quantity in the canonical base unit (grams for mass) so finished-batch deduction lines up.
 from services import units
+from services import order_by, search_where
 
 # ADDED: promote_planned_batches calls log_action directly to record promotions.
 #        log_action moved to services.audit, so we import it here.
@@ -529,11 +530,40 @@ def add_to_batches(product_name, quantity, notes=None, batch_number=None, deduct
         db.close()
 
 
-def get_batches(page=None, per_page=50, sort='desc'):
-    """Gets all batches ready to ship, ordered by date_completed (newest first by default)."""
+# sort/search feature — whitelists (URL key → SQL) for the batch list pages. `remaining` and
+# `batch_cost` are SELECT aliases, which ORDER BY may name directly on both databases.
+_READY_SORT_COLS = {
+    "date": "date_completed",
+    "product": "product_name",
+    "available": "remaining",
+    "cost": "batch_cost",
+    "batch_number": "batch_number",
+}
+_PLANNED_SORT_COLS = {
+    "date": "planned_completion_date",
+    "product": "product_name",
+    "quantity": "quantity",
+    "batch_number": "batch_number",
+}
+# Manage Batches shows one status-aware date per row (manage_batches.html); sort by that same date.
+_MANAGE_BATCH_SORT_COLS = {
+    "date": "CASE WHEN status = 'Planned' THEN planned_completion_date "
+            "WHEN status = 'Shipped' THEN date_shipped ELSE date_completed END",
+    "batch_number": "batch_number",
+    "product": "product_name",
+    "quantity": "quantity",
+    "status": "status",
+}
+_BATCH_SEARCH_COLS = ["batch_number", "product_name"]
+
+
+def get_batches(page=None, per_page=50, sort='desc', sort_by='date', q=None):
+    """Gets all batches ready to ship, ordered by date_completed (newest first by default).
+    sort = direction; sort_by = a _READY_SORT_COLS key; q = batch # / product search."""
     global _last_promote_time
-    # sort feature — whitelist direction; never interpolate raw user input into SQL
-    direction = 'ASC' if sort == 'asc' else 'DESC'
+    order_clause = order_by(_READY_SORT_COLS, sort_by, sort, "date_completed DESC, batch_id DESC", "batch_id DESC")
+    where, where_params = search_where(_BATCH_SEARCH_COLS, q)
+    and_where = f"AND {where}" if where else ""
     now = time.time()
     # PRESERVED: time-gated side effect — promotes overdue planned batches at most once per 60 s
     if now - _last_promote_time > 60:
@@ -604,24 +634,24 @@ def get_batches(page=None, per_page=50, sort='desc'):
            (SELECT COUNT(DISTINCT bm.batch_id) FROM batch_materials bm
             WHERE bm.lot_id = batches.mix_lot_id) AS mix_consumed_count
     FROM batches
-    WHERE status IN ('Ready', 'Partially Shipped')
-    ORDER BY date_completed {direction}, batch_id DESC
+    WHERE status IN ('Ready', 'Partially Shipped') {and_where}
+    {order_clause}
     """
 
     try:
         # ADDED: page=None → full table without LIMIT (used by export routes)
         if page is None:
-            db.execute(cursor, base_query)
+            db.execute(cursor, base_query, where_params or None)
             result = cursor.fetchall()
             return (pd.DataFrame(result, columns=columns), None)
 
         # ADDED: count query so the route can compute total_pages
-        db.execute(cursor, "SELECT COUNT(*) FROM batches WHERE status IN ('Ready', 'Partially Shipped')")
+        db.execute(cursor, f"SELECT COUNT(*) FROM batches WHERE status IN ('Ready', 'Partially Shipped') {and_where}", where_params or None)
         total = cursor.fetchone()[0]
 
         # ADDED: LIMIT/OFFSET for pagination
         offset = (page - 1) * per_page
-        db.execute(cursor, base_query + " LIMIT %s OFFSET %s", (per_page, offset))
+        db.execute(cursor, base_query + " LIMIT %s OFFSET %s", where_params + (per_page, offset))
         result = cursor.fetchall()
         return (pd.DataFrame(result, columns=columns), total)
 
@@ -849,7 +879,7 @@ def delete_batch(batch_id, materials_to_reallocate=None, reallocate=False):
     finally:
         db.close()
 
-def get_all_batches_with_id(page=None, per_page=50):
+def get_all_batches_with_id(page=None, per_page=50, sort_by=None, sort_dir='desc', q=None):
     """
     Get all batches including shipped ones, using batch_id
 
@@ -869,7 +899,10 @@ def get_all_batches_with_id(page=None, per_page=50):
     columns = ['batch_id', 'batch_number', 'product_name', 'quantity', 'date_completed',
                'status', 'notes', 'date_shipped', 'expiration_date', 'planned_completion_date', 'batch_type',
                'promotion_failure_reason', 'deduction_mode', 'is_organic', 'product_unit']
-    base_query = """
+    order_clause = order_by(_MANAGE_BATCH_SORT_COLS, sort_by, sort_dir, "date_completed DESC", "batch_id DESC")
+    where, where_params = search_where(_BATCH_SEARCH_COLS + ["status"], q)
+    where_sql = f"WHERE {where}" if where else ""
+    base_query = f"""
     SELECT batch_id, batch_number, product_name, quantity, date_completed, status, notes, date_shipped, expiration_date, planned_completion_date, batch_type,
            promotion_failure_reason, deduction_mode,
            (SELECT CASE
@@ -883,23 +916,24 @@ def get_all_batches_with_id(page=None, per_page=50):
            (SELECT product_unit FROM recipes
             WHERE LOWER(recipes.product_name) = LOWER(batches.product_name) LIMIT 1) AS product_unit
     FROM batches
-    ORDER BY date_completed DESC
+    {where_sql}
+    {order_clause}
     """
 
     try:
         # ADDED: page=None → full table without LIMIT (used by export routes)
         if page is None:
-            db.execute(cursor, base_query)
+            db.execute(cursor, base_query, where_params or None)
             result = cursor.fetchall()
             return (pd.DataFrame(result, columns=columns), None)
 
         # ADDED: count query so the route can compute total_pages
-        db.execute(cursor, "SELECT COUNT(*) FROM batches")
+        db.execute(cursor, f"SELECT COUNT(*) FROM batches {where_sql}", where_params or None)
         total = cursor.fetchone()[0]
 
         # ADDED: LIMIT/OFFSET for pagination
         offset = (page - 1) * per_page
-        db.execute(cursor, base_query + " LIMIT %s OFFSET %s", (per_page, offset))
+        db.execute(cursor, base_query + " LIMIT %s OFFSET %s", where_params + (per_page, offset))
         result = cursor.fetchall()
         return (pd.DataFrame(result, columns=columns), total)
 
@@ -1585,12 +1619,14 @@ def promote_planned_batches():
         db.close()
 
 
-def get_batches_planned(page=None, per_page=50, sort='desc'):
-    """Gets all Planned batches ordered by planned_completion_date (newest first by default)."""
+def get_batches_planned(page=None, per_page=50, sort='desc', sort_by='date', q=None):
+    """Gets all Planned batches ordered by planned_completion_date (newest first by default).
+    sort = direction; sort_by = a _PLANNED_SORT_COLS key; q = batch # / product search."""
     db = get_db_connection()
     cursor = db.cursor()
-    # sort feature — whitelist direction; never interpolate raw user input into SQL
-    direction = 'ASC' if sort == 'asc' else 'DESC'
+    order_clause = order_by(_PLANNED_SORT_COLS, sort_by, sort, "planned_completion_date DESC, batch_id DESC", "batch_id DESC")
+    where, where_params = search_where(_BATCH_SEARCH_COLS, q)
+    and_where = f"AND {where}" if where else ""
 
     # ADDED: converted from pd.read_sql_query to cursor approach for LIMIT/OFFSET support
     # ADDED: planned-deduction-mode feature — deduction_mode drives the "Deducted" / "Not yet
@@ -1605,25 +1641,25 @@ def get_batches_planned(page=None, per_page=50, sort='desc'):
            (SELECT product_unit FROM recipes
             WHERE LOWER(recipes.product_name) = LOWER(batches.product_name) LIMIT 1) AS product_unit
     FROM batches
-    WHERE status = 'Planned'
-    ORDER BY planned_completion_date {direction}, batch_id DESC
+    WHERE status = 'Planned' {and_where}
+    {order_clause}
     """
 
     try:
         # ADDED: page=None → full table without LIMIT (no planned-batch export route today,
         #        but sentinel keeps the signature consistent with the other three functions)
         if page is None:
-            db.execute(cursor, base_query)
+            db.execute(cursor, base_query, where_params or None)
             result = cursor.fetchall()
             return (pd.DataFrame(result, columns=columns), None)
 
         # ADDED: count query so the route can compute total_pages
-        db.execute(cursor, "SELECT COUNT(*) FROM batches WHERE status = 'Planned'")
+        db.execute(cursor, f"SELECT COUNT(*) FROM batches WHERE status = 'Planned' {and_where}", where_params or None)
         total = cursor.fetchone()[0]
 
         # ADDED: LIMIT/OFFSET for pagination
         offset = (page - 1) * per_page
-        db.execute(cursor, base_query + " LIMIT %s OFFSET %s", (per_page, offset))
+        db.execute(cursor, base_query + " LIMIT %s OFFSET %s", where_params + (per_page, offset))
         result = cursor.fetchall()
         return (pd.DataFrame(result, columns=columns), total)
 

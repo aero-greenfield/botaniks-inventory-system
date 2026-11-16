@@ -3,6 +3,7 @@
 {% block title %}Manage Shipments{% endblock %}
 
 {% block content %}
+{% from "_list_controls.html" import qs, sort_select, search_box %}
 
 <div class="page-header">
     <div>
@@ -10,6 +11,19 @@
         <p class="page-subtitle">Edit or delete shipments</p>
     </div>
     <a href="/shipments" class="btn btn-secondary">View Shipments</a>
+</div>
+
+<div class="list-controls">
+    {{ search_box(list_params, 'Shipment #, destination, category…') }}
+    {{ sort_select([
+        ('Date Shipped (Newest)', 'date', 'desc'),
+        ('Date Shipped (Oldest)', 'date', 'asc'),
+        ('Shipment # (A–Z)', 'shipment_number', 'asc'),
+        ('Shipment # (Z–A)', 'shipment_number', 'desc'),
+        ('Destination (A–Z)', 'destination', 'asc'),
+        ('Category (A–Z)', 'category', 'asc'),
+        ('# Batches (High→Low)', 'batches', 'desc'),
+    ], list_params) }}
 </div>
 
 {% if shipments %}
@@ -51,7 +65,11 @@
 </div>
 {% else %}
 <div class="table-container" style="padding:40px 24px;text-align:center;color:var(--text-muted);">
+    {% if list_params.q %}
+    <p>No shipments match &ldquo;{{ list_params.q }}&rdquo;.</p>
+    {% else %}
     <p>No shipments found.</p>
+    {% endif %}
 </div>
 {% endif %}
 

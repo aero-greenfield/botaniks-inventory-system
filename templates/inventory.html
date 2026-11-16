@@ -3,22 +3,8 @@
 {% block title %}Raw Materials{% endblock %}
 
 {% block content %}
+{% from "_list_controls.html" import qs, sort_select, search_box %}
 
-{# ADDED: sort feature — a single Sort dropdown. Each option's value is the query string for
-   that ordering; selecting one navigates there (resetting to page 1). The matching option is
-   pre-selected from the current `sort`/`direction`. #}
-{% macro sort_box(options) %}
-<label style="display:inline-flex;align-items:center;gap:6px;font-size:14px;color:var(--text-muted);">
-    Sort:
-    <select onchange="if(this.value)location.href=this.value;"
-            class="btn btn-secondary" style="padding:5px 10px;cursor:pointer;">
-        <option value="?page=1" {{ 'selected' if not sort }}>Default</option>
-        {% for label, col, dir in options %}
-        <option value="?sort={{ col }}&dir={{ dir }}&page=1" {{ 'selected' if sort == col and direction == dir }}>{{ label }}</option>
-        {% endfor %}
-    </select>
-</label>
-{% endmacro %}
 
 {# ADDED: table-redesign — one macro renders both the Raw and Housemade material tables
    (identical structure). 4-column scannable spine + an expandable per-row drawer holding
@@ -143,18 +129,6 @@
         <p class="page-subtitle">Manage your raw material inventory</p>
     </div>
     <div style="display:flex;gap:10px;align-items:center;">
-        {{ sort_box([
-            ('Name (A–Z)', 'name', 'asc'),
-            ('Name (Z–A)', 'name', 'desc'),
-            ('Category (A–Z)', 'category', 'asc'),
-            ('Category (Z–A)', 'category', 'desc'),
-            ('Stock (Low→High)', 'stock_level', 'asc'),
-            ('Stock (High→Low)', 'stock_level', 'desc'),
-            ('Reorder Level (Low→High)', 'reorder_level', 'asc'),
-            ('Reorder Level (High→Low)', 'reorder_level', 'desc'),
-            ('Total Cost (Low→High)', 'total_cost', 'asc'),
-            ('Total Cost (High→Low)', 'total_cost', 'desc'),
-        ]) }}
         <a href="/manage-materials" class="btn btn-secondary">Manage Materials</a>
         <a href="/manage-lots" class="btn btn-secondary">Manage Lots</a>
         <a href="/export/inventory-excel" class="btn btn-secondary">&#8595; Export Excel</a>
@@ -163,13 +137,29 @@
     </div>
 </div>
 
+<div class="list-controls">
+    {{ search_box(list_params, 'Material or category…') }}
+    {{ sort_select([
+        ('Name (A–Z)', 'name', 'asc'),
+        ('Name (Z–A)', 'name', 'desc'),
+        ('Category (A–Z)', 'category', 'asc'),
+        ('Category (Z–A)', 'category', 'desc'),
+        ('Stock (Low→High)', 'stock_level', 'asc'),
+        ('Stock (High→Low)', 'stock_level', 'desc'),
+        ('Reorder Level (Low→High)', 'reorder_level', 'asc'),
+        ('Reorder Level (High→Low)', 'reorder_level', 'desc'),
+        ('Total Cost (Low→High)', 'total_cost', 'asc'),
+        ('Total Cost (High→Low)', 'total_cost', 'desc'),
+    ], list_params) }}
+</div>
+
 <button type="button" class="section-toggle" data-section="raw-materials-section"><span class="caret">&#9660;</span> Raw Materials</button>
 <div id="raw-materials-section">
 {% if materials | rejectattr('is_housemade') | list %}
 {{ material_table(materials | rejectattr('is_housemade') | list, offset_raw) }}
 {% else %}
 <div class="table-container" style="padding:40px 24px;text-align:center;color:var(--text-muted);margin-bottom:32px;">
-    <p>No raw materials in inventory. <a href="/add-material" style="color:var(--accent);">Add your first material</a></p>
+    {% if list_params.q %}<p>No raw materials match &ldquo;{{ list_params.q }}&rdquo;.</p>{% else %}<p>No raw materials in inventory. <a href="/add-material" style="color:var(--accent);">Add your first material</a></p>{% endif %}
 </div>
 {% endif %}
 </div>
@@ -180,24 +170,22 @@
 {{ material_table(materials | selectattr('is_housemade', 'equalto', 1) | list, offset_housemade) }}
 {% else %}
 <div class="table-container" style="padding:40px 24px;text-align:center;color:var(--text-muted);">
-    <p>No housemade materials in inventory.</p>
+    {% if list_params.q %}<p>No housemade materials match &ldquo;{{ list_params.q }}&rdquo;.</p>{% else %}<p>No housemade materials in inventory.</p>{% endif %}
 </div>
 {% endif %}
 </div>
 
 {# ADDED: pagination controls — only shown when there is more than one page #}
 {% if total_pages > 1 %}
-{# ADDED: sort feature — preserve the active sort across page navigation. #}
-{% set sort_qs = ('&sort=' ~ sort ~ '&dir=' ~ direction) if sort else '' %}
 <nav style="display:flex;align-items:center;gap:12px;margin-top:24px;font-size:14px;">
     {% if page > 1 %}
-        <a href="?page={{ page - 1 }}{{ sort_qs }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
+        <a href="{{ qs(list_params, {'page': page - 1}) }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
     {% else %}
         <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">&#8592; Prev</span>
     {% endif %}
     <span style="color:var(--text-muted);">Page {{ page }} of {{ total_pages }} &mdash; {{ total }} material(s)</span>
     {% if page < total_pages %}
-        <a href="?page={{ page + 1 }}{{ sort_qs }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
+        <a href="{{ qs(list_params, {'page': page + 1}) }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
     {% else %}
         <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">Next &#8594;</span>
     {% endif %}

@@ -3,6 +3,7 @@
 {% block title %}Manage Lots{% endblock %}
 
 {% block content %}
+{% from "_list_controls.html" import qs, sort_select, search_box %}
 
 <div class="page-header">
     <div>
@@ -10,6 +11,23 @@
         <p class="page-subtitle">Edit or remove lots from inventory</p>
     </div>
     <a href="/receive-lot" class="btn btn-primary">+ Receive Lot</a>
+</div>
+
+<div class="list-controls">
+    {{ search_box(list_params, 'Lot #, material, supplier, location…') }}
+    {{ sort_select([
+        ('Received (Newest)', 'received', 'desc'),
+        ('Received (Oldest)', 'received', 'asc'),
+        ('Expiry (Soonest)', 'expiry', 'asc'),
+        ('Expiry (Latest)', 'expiry', 'desc'),
+        ('Material (A–Z)', 'material', 'asc'),
+        ('Material (Z–A)', 'material', 'desc'),
+        ('Qty Remaining (Low→High)', 'quantity', 'asc'),
+        ('Qty Remaining (High→Low)', 'quantity', 'desc'),
+        ('Location (A–Z)', 'location', 'asc'),
+        ('Supplier (A–Z)', 'supplier', 'asc'),
+        ('Lot # (A–Z)', 'lot_number', 'asc'),
+    ], list_params, include_default=False) }}
 </div>
 
 {# REMOVED: was request.args.get('msg'/'err') URL-param messages — now handled by flash() in base.html #}
@@ -62,7 +80,11 @@
 </div>
 {% else %}
 <div class="table-container" style="padding:40px 24px;text-align:center;color:var(--text-muted);">
+    {% if list_params.q %}
+    <p>No lots match &ldquo;{{ list_params.q }}&rdquo;.</p>
+    {% else %}
     <p>No lots found. <a href="/receive-lot" style="color:var(--accent);">Receive your first lot</a></p>
+    {% endif %}
 </div>
 {% endif %}
 
@@ -70,13 +92,13 @@
 {% if total_pages > 1 %}
 <nav style="display:flex;align-items:center;gap:12px;margin-top:24px;font-size:14px;">
     {% if page > 1 %}
-        <a href="?page={{ page - 1 }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
+        <a href="{{ qs(list_params, {'page': page - 1}) }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
     {% else %}
         <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">&#8592; Prev</span>
     {% endif %}
     <span style="color:var(--text-muted);">Page {{ page }} of {{ total_pages }} &mdash; {{ total }} lot(s)</span>
     {% if page < total_pages %}
-        <a href="?page={{ page + 1 }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
+        <a href="{{ qs(list_params, {'page': page + 1}) }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
     {% else %}
         <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">Next &#8594;</span>
     {% endif %}
