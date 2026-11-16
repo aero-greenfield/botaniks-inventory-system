@@ -37,7 +37,7 @@ from flask_wtf.csrf import CSRFProtect # security necesity.
 
 
 from services.setup import create_database
-from services.audit import log_action, view_logs
+from services.audit import log_action, view_logs, diff, current_source
 # ADDED: units-conversion-layer feature — conversion helpers (entry units -> stored base unit).
 from services import units
 from services.materials import (
@@ -122,6 +122,12 @@ use logging.info("...") instead of print
 # =======================
 
 app = Flask(__name__)  # creates flask instance, so this web app name is 'app' which can be used to run the server and define routes.
+
+
+@app.before_request
+def _tag_audit_source():
+    # Every audit row written during this request records which route wrote it.
+    current_source.set(f"{request.method} {request.path}")
 
 # CSRFprotect 
 secret = os.environ.get('SECRET_KEY')
@@ -465,7 +471,7 @@ def index():
     # page=None returns None for the count, and df_recipes has one row per ingredient,
     # so count distinct recipes by product name.
     recipe_count = df_recipes['recipe_product_name'].nunique() if not df_recipes.empty else 0
-    df_logs = view_logs()
+    df_logs, _ = view_logs(per_page=5)
 
     return render_template("index.html",
         total_materials=len(df_materials),
@@ -473,7 +479,7 @@ def index():
         low_stock_items=df_low.to_dict(orient='records'),
         batch_count=batch_count,
         recipe_count=recipe_count,
-        recent_logs=df_logs.head(5).to_dict(orient='records'),
+        recent_logs=df_logs.to_dict(orient='records'),
     )
 
 
@@ -485,11 +491,20 @@ def index():
 @app.route('/audit-log')
 @requires_auth
 def view_audit_log():
-    df = view_logs()
+    PER_PAGE = 100
+    entity_type = request.args.get('entity_type') or None
+    entity_id = request.args.get('entity_id', type=int)
+    page = min(max(1, request.args.get('page', 1, type=int)), MAX_PAGE)
+    df, total = view_logs(entity_type, entity_id, page=page, per_page=PER_PAGE)
     logs = df.to_dict(orient='records') if not df.empty else []
     return render_template("audit_log.html",
         logs=logs,
         count=len(logs),
+        total=total,
+        page=page,
+        total_pages=math.ceil(total / PER_PAGE) if total else 1,
+        entity_type=entity_type if entity_id is not None else None,
+        entity_id=entity_id,
         back_link=True,
         back_link_url="/",
         back_link_label="Back to Home"
@@ -754,7 +769,8 @@ def receive_lot():
                 back_link=True, back_link_url="/receive-lot", back_link_label="Go back"), 500
 
         #success. 
-        log_action('lot_received', f"material={name}, lot={lot_number}, qty={quantity}, date={received_date}")
+        log_action('lot_received', f"material={name}, lot={lot_number}, qty={quantity}, date={received_date}",
+                   entity=('lot', lot_id))
         return redirect(url_for('view_inventory'))
 
 
@@ -914,7 +930,8 @@ def add_material_route():
 
         elif result: # if result is good.
             logging.info(f"Material added: '{name}' | category={category}, unit={unit}")
-            log_action('material_added', f"name={name}, category={category}, unit={unit}")
+            log_action('material_added', f"name={name}, category={category}, unit={unit}",
+                       entity=('material', result))
             if from_receive_lot == '1': #if this route was directed via lot recieve func, go back to that when done.
                 return redirect(url_for('receive_lot',
                     material_name=name,
@@ -1150,6 +1167,7 @@ def update_material_details(material_id):
         ), 400
     reorder_level = float(units.to_base(reorder_level, unit))
 
+    before_row = get_material_by_id(material_id)
     result = update_raw_material(material_id, name=name, category=category, unit=unit,
                                  reorder_level=reorder_level,
                                  dimension=dimension,  # ADDED: units-conversion-layer feature
@@ -1157,7 +1175,13 @@ def update_material_details(material_id):
 
     if result:
         logging.info(f"Material details updated: material_id={material_id}, name={name}, category={category}, unit={unit}")
-        log_action('material_updated', f"material_id={material_id}, name={name}, category={category}")
+        before = dict(zip(['material_id', 'name', 'category', 'unit', 'reorder_level', 'is_edible',
+                           'is_organic', 'dimension'], before_row or ()))
+        after = {k: v for k, v in dict(name=name, category=category, unit=unit, reorder_level=reorder_level,
+                                       dimension=dimension, is_edible=is_edible, is_organic=is_organic).items()
+                 if v is not None}
+        log_action('material_updated', f"name={name}", entity=('material', material_id),
+                   changes=diff(before, after))
         # CHANGED: was url_for(..., msg=...) — moved to flash() so messages are session-backed
         flash('Details updated successfully', 'success')
         return redirect(url_for('edit_material', material_id=material_id))
@@ -1171,6 +1195,7 @@ def update_material_details(material_id):
 @requires_auth
 def delete_material(material_id):
     
+    material = get_material_by_id(material_id)
     result = delete_raw_material(material_id)
     if not result:
         return render_template('error.html',
@@ -1178,7 +1203,10 @@ def delete_material(material_id):
             message="Could not delete material. Please try again.",
         ), 500
     logging.info(f"Material deleted: material_id={material_id}")
-    log_action('material_deleted', f"material_id={material_id}")
+    # Deleting a material also deletes its lots, recipe lines and batch_materials rows.
+    log_action('material_deleted', f"name={material[1] if material else None}, "
+                                   f"affected_batches={result.get('affected_batches')}",
+               entity=('material', material_id))
     if result.get("affected_batches"):
         count = len(result["affected_batches"])
         warning = f"Material deleted. Note: it was used in {count} batch(es) — those records no longer show this ingredient."
@@ -1213,7 +1241,8 @@ def toggle_material_flag(material_id, field):
     # get_material_by_id returns (mat_id, name, category, unit, reorder_level, is_edible, is_organic)
     current = bool(material[5] if field == 'is_edible' else material[6])
     update_raw_material(material_id, **{field: not current})
-    log_action('material_flag_toggled', f"material_id={material_id}, {field}={not current}")
+    log_action('material_flag_toggled', f"name={material[1]}", entity=('material', material_id),
+               changes={field: [current, not current]})
 
     # Preserve the manage-materials pagination position the user clicked from.
     page = request.args.get('page', 1)
@@ -1641,7 +1670,8 @@ def create_batch():
             result = add_to_batches(product_name, quantity, notes=notes, batch_number=batch_number, deduct_resources=True, expiration_date=expiration_date, planned_completion_date=planned_completion_date, batch_type=batch_type, allow_negative=confirm_negative, lot_selections=lot_selections, deduction_mode=deduction_mode)
             if result:
                 logging.info(f"Batch created: product='{product_name}', quantity={quantity}, batch_number={batch_number}, batch_type={batch_type}")
-                log_action('batch_created', f"product={product_name}, quantity={quantity}, batch_id={result}, batch_number={batch_number}, batch_type={batch_type}, deduction_mode={deduction_mode}")
+                log_action('batch_created', f"product={product_name}, quantity={quantity}, batch_number={batch_number}, batch_type={batch_type}, deduction_mode={deduction_mode}",
+                           entity=('batch', result))
                 return redirect(url_for('view_batches'))
             else:
                 return render_template('error.html',
@@ -1912,18 +1942,25 @@ def update_batch_details(batch_id):
 
     if result:
         logging.info(f"Batch details updated: batch_id={batch_id}, product_name={product_name}, quantity={quantity}")
-        log_action('batch_updated', f"batch_id={batch_id}, product_name={product_name}, quantity={quantity}")
+        before = dict(zip(['batch_id', 'product_name', 'quantity', 'date_completed', 'status', 'notes',
+                           'date_shipped', 'expiration_date', 'planned_completion_date'], existing or ()))
+        after = {k: v for k, v in dict(product_name=product_name, quantity=quantity, notes=notes,
+                                       expiration_date=expiration_date,
+                                       planned_completion_date=planned_completion_date).items()
+                 if v is not None}
+        log_action('batch_updated', None, entity=('batch', batch_id), changes=diff(before, after))
 
         if quantity_changed:
             clear_planned_lot_selections(batch_id)
-            log_action('planned_lots_cleared', f"batch_id={batch_id}, reason=quantity_changed")
+            log_action('planned_lots_cleared', "reason=quantity_changed", entity=('batch', batch_id))
             flash('Quantity changed — lot selections were cleared. Re-select lots, or the oldest lots (FIFO) will be used at the planned date.', 'warning')
 
         if new_quantities:
-            log_action('batch_materials_adjusted', f"batch_id={batch_id}, adjustments={new_quantities}")
+            log_action('batch_materials_adjusted', f"adjustments={new_quantities}", entity=('batch', batch_id))
             flash('Batch details and material deductions updated successfully', 'success')
         elif quantity is not None:
-            log_action('batch_materials_reconciled', f"batch_id={batch_id}, quantity={quantity}, mode=proportional")
+            log_action('batch_materials_reconciled', f"quantity={quantity}, mode=proportional",
+                       entity=('batch', batch_id))
             flash('Batch details updated — raw material deductions were adjusted to match the new quantity', 'success')
         else:
             flash('Batch details updated successfully', 'success')
@@ -2038,7 +2075,8 @@ def change_batch_status(batch_id):
             return redirect(url_for('edit_batch', batch_id=batch_id))
     if result:
         logging.info(f"Batch status changed: batch_id={batch_id}, new_status={new_status}")
-        log_action('batch_status_changed', f"batch_id={batch_id}, new_status={new_status}")
+        log_action('batch_status_changed', None, entity=('batch', batch_id),
+                   changes={'status': [current[4] if current else None, new_status]})
         # CHANGED: was url_for(..., msg=...) — moved to flash()
         flash(f'Batch status updated to {new_status}', 'success')
         # The Batches page's "Mark Ready" button sends next=batches so staff land back there, not on edit.
@@ -2079,6 +2117,7 @@ def delete_batch_route(batch_id):
 
 
 
+    batch = get_batch_by_id(batch_id)
     result = delete_batch(batch_id, materials_to_reallocate, reallocate=bool(materials_to_reallocate))
     if result == "shipped":
         return render_template('error.html',
@@ -2091,7 +2130,9 @@ def delete_batch_route(batch_id):
             message="Could not delete batch. The batch may not exist.",
         ), 500
     logging.info(f"Batch deleted: batch_id={batch_id}, reallocate={bool(materials_to_reallocate)}")
-    log_action('batch_deleted', f"batch_id={batch_id}, reallocate={bool(materials_to_reallocate)}")
+    log_action('batch_deleted', f"batch_number={batch[10] if batch else None}, product={batch[1] if batch else None}, "
+                                f"quantity={batch[2] if batch else None}, reallocated={materials_to_reallocate}",
+               entity=('batch', batch_id))
     return redirect(url_for('manage_batches'))
 
 
@@ -2428,7 +2469,8 @@ def add_recipe_route():
             if result:
                 #success
                 logging.info(f"Recipe added: '{product_name}' with {len(materials)} materials")
-                log_action('recipe_added', f"product_name={product_name}, materials={len(materials)}")
+                log_action('recipe_added', f"product_name={product_name}, materials={len(materials)}",
+                           entity=('recipe', result))
                 return redirect(url_for('view_recipes'))
             else:
                 
@@ -2663,12 +2705,22 @@ def update_recipe_route(recipe_id):
             back_link=True, back_link_url=f"/edit-recipe/{recipe_id}", back_link_label="Go back"
         ), 400
     
+    before_df = get_recipe_by_id(recipe_id)
     result = update_recipe(recipe_id, product_name=product_name, notes=notes, materials=materials, product_unit=product_unit, product_dimension=product_dimension, batch_type=batch_type)
     
 
     if result:
         logging.info(f"Recipe updated: recipe_id={recipe_id}, product_name={product_name}")
-        log_action('recipe_updated', f"recipe_id={recipe_id}, product_name={product_name}")
+        before = {}
+        if before_df is not None and not before_df.empty:
+            before = before_df.iloc[0][['product_name', 'notes', 'product_unit', 'product_dimension', 'batch_type']].to_dict()
+            before['materials'] = {r.material_name: r.quantity_needed for r in before_df.itertuples() if r.material_name}
+        after = {k: v for k, v in dict(product_name=product_name, notes=notes, product_unit=product_unit,
+                                       product_dimension=product_dimension, batch_type=batch_type,
+                                       materials={m['material_name']: m['quantity_needed'] for m in materials}).items()
+                 if v is not None}
+        log_action('recipe_updated', f"product_name={product_name}", entity=('recipe', recipe_id),
+                   changes=diff(before, after))
         # CHANGED: was url_for(..., msg=...) — moved to flash()
         flash('Recipe details updated successfully', 'success')
         return redirect(url_for('edit_recipe', recipe_id=recipe_id))
@@ -2686,6 +2738,7 @@ def delete_recipe_route(recipe_id):
     POST route
     """
     
+    recipe_df = get_recipe_by_id(recipe_id)
     result = delete_recipe_by_id(recipe_id)
     if not result:
         return render_template('error.html',
@@ -2693,7 +2746,8 @@ def delete_recipe_route(recipe_id):
             message="Could not delete recipe. Please try again.",
         ), 500
     logging.info(f"Recipe deleted: recipe_id={recipe_id}")
-    log_action('recipe_deleted', f"recipe_id={recipe_id}")
+    name = recipe_df['product_name'].iloc[0] if recipe_df is not None and not recipe_df.empty else None
+    log_action('recipe_deleted', f"product_name={name}", entity=('recipe', recipe_id))
     return redirect(url_for('manage_recipes'))
 
 
@@ -2930,14 +2984,19 @@ def update_lot_route(lot_id):
 
         if result:
             logging.info(f"Lot updated: lot_id={lot_id}, lot_number={lot_number}, quantity={quantity}")
-            log_action('lot_updated', f"lot_id={lot_id}, lot_number={lot_number}, quantity={quantity}")
+            before = lot_df.iloc[0].to_dict()
+            after = {k: v for k, v in dict(lot_number=lot_number, quantity=quantity, expiration_date=expiration_date,
+                                           location=location, cost_per_unit=cost_per_unit, supplier=supplier).items()
+                     if v is not None}
+            log_action('lot_updated', None, entity=('lot', lot_id), changes=diff(before, after))
             if quantity is not None:
                 note = f", note={adjust_note}" if adjust_note else ""
                 old_display = float(units.from_base(lot_df['quantity'].iloc[0], lot_unit))
                 log_action('lot_quantity_adjusted',
-                           f"lot_id={lot_id}, lot_number={lot_df['lot_number'].iloc[0]}, "
+                           f"lot_number={lot_df['lot_number'].iloc[0]}, "
                            f"{old_display:g} {lot_unit} -> {quantity_display:g} {lot_unit}, "
-                           f"reason={LOT_ADJUST_REASONS[adjust_reason]}{note}")
+                           f"reason={LOT_ADJUST_REASONS[adjust_reason]}{note}",
+                           entity=('lot', lot_id))
             # CHANGED: was url_for(..., msg=...) — moved to flash()
             flash('Lot details updated successfully', 'success')
             return redirect(url_for('edit_lot', lot_id=lot_id))
@@ -2992,7 +3051,8 @@ def delete_lot_route(lot_id):
     result = delete_lot(lot_id)
 
     if result:
-        log_action('lot_deleted', f"lot_id={lot_id}, lot_number={lot_number}")
+        log_action('lot_deleted', f"lot_number={lot_number}, material={lot_df['material_name'].iloc[0]}, "
+                                  f"quantity={lot_df['quantity'].iloc[0]}", entity=('lot', lot_id))
         # CHANGED: was url_for(..., msg=...) — moved to flash()
         flash('Lot deleted successfully', 'success')
         return redirect(url_for('manage_lots'))

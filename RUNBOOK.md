@@ -91,6 +91,25 @@ not sure, **leave it alone** and ask the system owner.
   and database are reachable, or an error/503 when the database is down. Use this for uptime
   monitoring (Render health check or a free monitor like UptimeRobot).
 
+### Tracing a bad edit (audit log)
+- **Audit Log → click a record** (e.g. `lot #42`) shows every change to that record, with
+  `old → new` values, the route that wrote it (Source), and the deployed commit (hover Source).
+- If an audit write ever fails, the full row is still in Render's logs: search for
+  `Failed to write audit log`.
+- **One-time migration before deploying the audit-log refactor** — run in the Supabase SQL editor
+  first, or every audit write will fail:
+  ```sql
+  ALTER TABLE audit_log
+      ADD COLUMN IF NOT EXISTS entity_type TEXT,
+      ADD COLUMN IF NOT EXISTS entity_id   INTEGER,
+      ADD COLUMN IF NOT EXISTS changes     TEXT,
+      ADD COLUMN IF NOT EXISTS source      TEXT,
+      ADD COLUMN IF NOT EXISTS app_version TEXT;
+  CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);
+  ```
+  Rows from before this change have no record id, so they show in the full list but not in a
+  record's history.
+
 ### Known minor quirks (not emergencies)
 - Clicking **Edit** on a *Planned* batch shows a "Batch Materials Not Found" page — Planned batches
   have no materials recorded yet, so they can't be edited until they complete. View their status

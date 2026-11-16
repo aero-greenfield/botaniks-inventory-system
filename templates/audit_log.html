@@ -6,8 +6,13 @@
 
 <div class="page-header">
     <div>
+        {% if entity_type %}
+        <h1>History of {{ entity_type }} #{{ entity_id }}</h1>
+        <p class="page-subtitle">{{ total }} change(s) &middot; <a href="{{ url_for('view_audit_log') }}">Show all</a></p>
+        {% else %}
         <h1>Audit Log</h1>
-        <p class="page-subtitle">Showing last {{ count }} entries</p>
+        <p class="page-subtitle">{{ total }} entries &middot; newest first</p>
+        {% endif %}
     </div>
 </div>
 
@@ -16,22 +21,54 @@
     <table class="data-table">
         <thead>
             <tr>
-                <th>Timestamp</th>
+                <th>Time</th>
                 <th>Action</th>
+                <th>Record</th>
+                <th>Changes</th>
                 <th>Details</th>
+                <th>Source</th>
             </tr>
         </thead>
         <tbody>
             {% for row in logs %}
             <tr>
-                <td style="white-space:nowrap;color:var(--text-muted);">{{ row['timestamp'] | fmt_date('%d %b %Y %H:%M') }}</td>
-                <td style="white-space:nowrap;font-weight:500;">{{ row['action'] }}</td>
-                <td style="word-break:break-word;">{{ row['details'] }}</td>
+                <td class="mono" style="white-space:nowrap;color:var(--text-muted);">{{ row['timestamp'] | fmt_date('%d %b %Y %H:%M') }}</td>
+                <td style="white-space:nowrap;font-weight:500;">{{ row['action'] | humanize }}</td>
+                <td class="mono" style="white-space:nowrap;">
+                    {% if row['entity_type'] and row['entity_id'] is not none %}
+                    <a href="{{ url_for('view_audit_log', entity_type=row['entity_type'], entity_id=row['entity_id']|int) }}">{{ row['entity_type'] }} #{{ row['entity_id']|int }}</a>
+                    {% else %}&mdash;{% endif %}
+                </td>
+                <td class="mono" style="word-break:break-word;">
+                    {% for field, pair in row['changes'].items() %}
+                    <div>{{ field }}: {{ pair[0] | dash }} &rarr; {{ pair[1] | dash }}</div>
+                    {% else %}&mdash;{% endfor %}
+                </td>
+                <td style="word-break:break-word;">{{ row['details'] | dash }}</td>
+                <td class="mono" style="white-space:nowrap;color:var(--text-muted);" title="version {{ row['app_version'] | dash }}">{{ row['source'] | dash }}</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
+
+{% if total_pages > 1 %}
+{% set filt = {'entity_type': entity_type, 'entity_id': entity_id} if entity_type else {} %}
+<nav style="display:flex;align-items:center;gap:12px;margin-top:24px;font-size:14px;">
+    {% if page > 1 %}
+        <a href="{{ url_for('view_audit_log', page=page - 1, **filt) }}" class="btn btn-secondary" style="padding:5px 14px;">&#8592; Prev</a>
+    {% else %}
+        <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">&#8592; Prev</span>
+    {% endif %}
+    <span style="color:var(--text-muted);">Page {{ page }} of {{ total_pages }} &mdash; {{ total }} entries</span>
+    {% if page < total_pages %}
+        <a href="{{ url_for('view_audit_log', page=page + 1, **filt) }}" class="btn btn-secondary" style="padding:5px 14px;">Next &#8594;</a>
+    {% else %}
+        <span class="btn btn-secondary" style="padding:5px 14px;opacity:0.4;cursor:default;">Next &#8594;</span>
+    {% endif %}
+</nav>
+{% endif %}
+
 {% else %}
 <div class="table-container" style="padding:40px 24px;text-align:center;color:var(--text-muted);">
     <p>No audit log entries found.</p>

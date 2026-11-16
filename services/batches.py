@@ -1471,8 +1471,11 @@ def _promote_one(db, cursor, batch, completion_date, lot_date):
                 UPDATE batches SET mix_lot_id = %s WHERE batch_id = %s
             """, (mix_lot_id, batch_id))
 
-    # The claim already set status/date_completed; commit this batch on its own so a
-    # later batch failing to promote can't undo it.
+    # Audit row in the SAME transaction: the promotion and its record commit or roll back together.
+    log_action('planned_batch_promoted',
+               f"product={product_name}, type={batch_type}, deduction={deduction_mode}",
+               entity=('batch', batch_id),
+               changes={'status': ['Planned', 'Ready']}, db=db, cursor=cursor)
 
     # The claim already set status/date_completed; commit this batch on its own so a
     # later batch failing to promote can't undo it.
@@ -1492,7 +1495,6 @@ def promote_batch_now(batch_id):
     """
     db = get_db_connection()
     cursor = db.cursor()
-    promoted = None
     try:
         db.execute(cursor, """
             SELECT batch_id, batch_number, product_name, quantity, batch_type,
@@ -1508,7 +1510,6 @@ def promote_batch_now(batch_id):
             db, cursor, row[:7],
             completion_date=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), lot_date=today)
         if outcome == 'promoted':
-            promoted = (row[0], row[2], row[4], row[6])
             return True, None
         return False, reason or "Batch is not in Planned status."
 
@@ -1519,11 +1520,6 @@ def promote_batch_now(batch_id):
 
     finally:
         db.close()
-        # Audit AFTER the write connection is closed (see promote_planned_batches).
-        if promoted:
-            log_action('planned_batch_promoted',
-                       f"batch_id={promoted[0]}, product={promoted[1]}, type={promoted[2]}, "
-                       f"deduction={promoted[3]}, manual=True")
 
 
 
@@ -1559,10 +1555,6 @@ def promote_planned_batches():
 
     db = get_db_connection()
     cursor = db.cursor()
-    # Audit rows are written after each batch's transaction commits. log_action opens a SECOND
-    # connection; while our transaction holds SQLite's write lock, its INSERT fails with "database
-    # is locked" and audit.py swallows the error — which is why no promotion was ever audited.
-    promoted = []
     try:
         # CHANGED: server-timezone-vs-business-timezone fix — was datetime.now().strftime(...), the
         # server's own UTC clock on Render. Botaniks runs Pacific: for several hours every evening
@@ -1574,13 +1566,11 @@ def promote_planned_batches():
 
         for batch_id, batch_number, product_name, quantity, batch_type, planned_completion_date, planned_lot_selections_json, deduction_mode in overdue:
             try:
-                outcome, _ = _promote_one(
+                _promote_one(
                     db, cursor,
                     (batch_id, batch_number, product_name, quantity, batch_type,
                      planned_lot_selections_json, deduction_mode),
                     completion_date=planned_completion_date, lot_date=planned_completion_date)
-                if outcome == 'promoted':
-                    promoted.append((batch_id, product_name, batch_type, deduction_mode))
 
             except Exception as e:
                 # One bad batch must not abort the rest of the pass.
@@ -1593,12 +1583,6 @@ def promote_planned_batches():
 
     finally:
         db.close()
-
-    # Audit AFTER the write connection is closed: log_action opens its own connection, and on SQLite
-    # it cannot insert while this one holds the write lock.
-    for batch_id, product_name, batch_type, deduction_mode in promoted:
-        log_action('planned_batch_promoted',
-                   f"batch_id={batch_id}, product={product_name}, type={batch_type}, deduction={deduction_mode}")
 
 
 def get_batches_planned(page=None, per_page=50, sort='desc'):
@@ -1770,11 +1754,11 @@ def update_planned_lot_selections(batch_id, lot_selections):
     cursor = db.cursor()
 
     try:
-        db.execute(cursor, "SELECT status, deduction_mode FROM batches WHERE batch_id = %s", (batch_id,))
+        db.execute(cursor, "SELECT status, deduction_mode, planned_lot_selections FROM batches WHERE batch_id = %s", (batch_id,))
         row = cursor.fetchone()
         if not row:
             raise ValueError(f"Batch {batch_id} not found")
-        status, deduction_mode = row
+        status, deduction_mode, old_selections = row
         if status != 'Planned' or deduction_mode != 'deferred':
             raise ValueError(
                 f"Batch {batch_id} is not a deferred Planned batch (status={status}, "
@@ -1783,8 +1767,9 @@ def update_planned_lot_selections(batch_id, lot_selections):
 
         if not lot_selections:
             db.execute(cursor, "UPDATE batches SET planned_lot_selections = NULL WHERE batch_id = %s", (batch_id,))
+            log_action('planned_lots_updated', "cleared", entity=('batch', batch_id),
+                       changes={'planned_lot_selections': [old_selections, None]}, db=db, cursor=cursor)
             db.commit()
-            log_action('planned_lots_updated', f"batch_id={batch_id}, cleared")
             return True
 
         now = business_now().strftime('%Y-%m-%d %H:%M:%S')  # CHANGED: server-timezone-vs-business-timezone fix
@@ -1808,8 +1793,10 @@ def update_planned_lot_selections(batch_id, lot_selections):
         db.execute(cursor, "UPDATE batches SET planned_lot_selections = %s WHERE batch_id = %s", (payload, batch_id))
         if cursor.rowcount == 0:
             raise ValueError(f"Batch {batch_id} not found during update")
+        log_action('planned_lots_updated', f"materials={list(lot_selections)}",
+                   entity=('batch', batch_id), changes={'planned_lot_selections': [old_selections, payload]},
+                   db=db, cursor=cursor)
         db.commit()
-        log_action('planned_lots_updated', f"batch_id={batch_id}, materials={list(lot_selections)}")
         return True
 
     except ValueError:

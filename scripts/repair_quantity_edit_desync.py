@@ -203,7 +203,8 @@ def main():
             if result:
                 ok += 1
                 log_action("batch_quantity_desync_repaired",
-                           f"batch_id={batch_id}, quantity={current_quantity}, deductions_were_sized_for={basis}")
+                           f"quantity={current_quantity}, deductions_were_sized_for={basis}",
+                           entity=('batch', batch_id))
                 print(f"  batch {batch_id}: repaired")
             else:
                 failed.append((batch_id, "update_batch returned None"))

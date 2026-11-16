@@ -408,7 +408,12 @@ def init_database():
             log_id SERIAL PRIMARY KEY,
             action TEXT NOT NULL,
             details TEXT,
-            timestamp TIMESTAMPTZ DEFAULT NOW()
+            timestamp TIMESTAMPTZ DEFAULT NOW(),
+            entity_type TEXT,
+            entity_id INTEGER,
+            changes TEXT,
+            source TEXT,
+            app_version TEXT
         )
         """)
     else:
@@ -417,10 +422,16 @@ def init_database():
             log_id INTEGER PRIMARY KEY AUTOINCREMENT,
             action TEXT NOT NULL,
             details TEXT,
-            timestamp TEXT DEFAULT (datetime('now'))
+            timestamp TEXT DEFAULT (datetime('now')),
+            entity_type TEXT,
+            entity_id INTEGER,
+            changes TEXT,
+            source TEXT,
+            app_version TEXT
         )
         """)
-   
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id)")
+
     print("  ✅ audit_log table created")
    # ========================================
    # Save all changes
