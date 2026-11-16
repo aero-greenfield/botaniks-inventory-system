@@ -28,6 +28,14 @@
         ('Supplier (A–Z)', 'supplier', 'asc'),
         ('Lot # (A–Z)', 'lot_number', 'asc'),
     ], list_params, include_default=False) }}
+    <label class="list-control">
+        Show:
+        <select onchange="if(this.value)location.href=this.value;" class="btn btn-secondary">
+            {% for label, value in [('All lots', 'all'), ('Active only', 'active'), ('Inactive only', 'inactive')] %}
+            <option value="{{ qs(list_params, {'show': value}) }}" {{ 'selected' if list_params.show == value }}>{{ label }}</option>
+            {% endfor %}
+        </select>
+    </label>
 </div>
 
 {# REMOVED: was request.args.get('msg'/'err') URL-param messages — now handled by flash() in base.html #}
@@ -80,8 +88,9 @@
 </div>
 {% else %}
 <div class="table-container" style="padding:40px 24px;text-align:center;color:var(--text-muted);">
-    {% if list_params.q %}
-    <p>No lots match &ldquo;{{ list_params.q }}&rdquo;.</p>
+    {% if list_params.q or list_params.show != 'all' %}
+    <p>No {{ list_params.show ~ ' ' if list_params.show != 'all' }}lots{% if list_params.q %} match &ldquo;{{ list_params.q }}&rdquo;{% endif %}.
+       {% if list_params.show != 'all' %}<a href="{{ qs(list_params, {'show': 'all'}) }}" style="color:var(--accent);">Show all lots</a>{% endif %}</p>
     {% else %}
     <p>No lots found. <a href="/receive-lot" style="color:var(--accent);">Receive your first lot</a></p>
     {% endif %}

@@ -267,7 +267,14 @@ _LOT_SORT_COLS = {
 }
 
 
-def get_all_lots(material_id=None, page=None, per_page=50, sort_by=None, sort_dir='asc', q=None):
+# status filter — fixed SQL per allowed value; anything else (incl. None) means no filter.
+_LOT_STATUS_FILTERS = {
+    "active": "rml.status = 'active'",
+    "inactive": "(rml.status IS NULL OR rml.status <> 'active')",
+}
+
+
+def get_all_lots(material_id=None, page=None, per_page=50, sort_by=None, sort_dir='asc', q=None, status=None):
     """
     returns all lots, for given material_id if provided, otherwise all materials.
 
@@ -295,6 +302,8 @@ def get_all_lots(material_id=None, page=None, per_page=50, sort_by=None, sort_di
     if where:
         conditions.append(where)
         base_params += where_params
+    if status in _LOT_STATUS_FILTERS:
+        conditions.append(_LOT_STATUS_FILTERS[status])
     where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     order_clause = order_by(_LOT_SORT_COLS, sort_by, sort_dir, "rm.name ASC, rml.received_date ASC", "rml.lot_id DESC")
 
