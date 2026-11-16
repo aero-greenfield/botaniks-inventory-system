@@ -797,3 +797,43 @@ def test_api_available_lots_includes_location_and_display_qty(client, auth, make
     assert rows["A1"]["quantity"] == 2000           # still grams, lot_picker.js relies on it
     assert rows["A1"]["quantity_display"] == 2.0
     assert rows["A2"]["location"] is None           # shown as "—" in the dropdown
+
+
+def _ready_batch(db, name="A", qty=10):
+    cur = db.cursor()
+    db.execute(cur, """INSERT INTO batches (product_name, quantity, status, batch_number, batch_type)
+                       VALUES (%s, %s, 'Ready', %s, 'standard')""", (name, qty, name))
+    bid = db.get_last_insert_id(cur)
+    db.commit()
+    return bid
+
+
+def test_create_shipment_saves_buyer_and_contact(client, auth, db):
+    from services.contacts import get_contacts
+    bid = _ready_batch(db)
+    form = {"batch_ids": str(bid), f"qty_{bid}": "5", "date_shipped": "2026-07-15",
+            "destination": "Dock 4", "buyer_name": "Acme", "buyer_contact": "555-0100",
+            "carrier": "UPS", "tracking_number": "1Z999", "save_contact": "on"}
+    assert client.post("/shipments/create", data=form, headers=auth).status_code == 302
+    assert [(c["name"], c["contact_info"], c["destination"]) for c in get_contacts()] == \
+           [("Acme", "555-0100", "Dock 4")]
+
+    # second shipment, same buyer: shipment still created, duplicate contact not saved
+    form[f"qty_{bid}"] = "1"
+    assert client.post("/shipments/create", data=form, headers=auth).status_code == 302
+    assert len(get_contacts()) == 1
+
+
+def test_shipping_contacts_pages(client, auth):
+    from services.contacts import get_contacts
+    resp = client.post("/shipping-contacts/create", data={"name": "Acme", "contact_info": "x"}, headers=auth)
+    assert resp.status_code == 302
+    cid = get_contacts()[0]["contact_id"]
+    assert b"Acme" in client.get("/shipping-contacts", headers=auth).data
+    assert client.get(f"/shipping-contacts/{cid}/edit", headers=auth).status_code == 200
+    assert client.post("/shipping-contacts/create", data={"name": "acme"}, headers=auth).status_code == 400
+    client.post(f"/shipping-contacts/{cid}/update", data={"name": "Acme Co"}, headers=auth)
+    assert get_contacts()[0]["name"] == "Acme Co"
+    client.post(f"/shipping-contacts/{cid}/delete", headers=auth)
+    assert get_contacts() == []
+    assert b"contact-picker" in client.get("/shipments/new", headers=auth).data

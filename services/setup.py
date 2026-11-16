@@ -128,7 +128,11 @@ def create_database():
                     date_shipped    TEXT NOT NULL,
                     destination     TEXT,
                     notes           TEXT,
-                    category        TEXT
+                    category        TEXT,
+                    buyer_name      TEXT,
+                    carrier         TEXT,
+                    tracking_number TEXT,
+                    buyer_contact   TEXT
                    )
                    """)
 
@@ -223,6 +227,17 @@ def create_database():
                    )
                    """)
 
+    # Saved buyers for the create-shipment picker. Shipments copy these values (no FK),
+    # so editing/deleting a contact never rewrites past shipments.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS shipping_contacts(
+                   contact_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                   name         TEXT NOT NULL,
+                   contact_info TEXT,
+                   destination  TEXT
+                   )
+                   """)
+
     #Audit Log
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS audit_log(
@@ -286,9 +301,10 @@ def upgrade_schema():
     # ADDED: shipment-category feature — additive migration for pre-existing SQLite DBs.
     cursor.execute("PRAGMA table_info(shipments)")
     _shipment_cols = {row[1] for row in cursor.fetchall()}
-    if "category" not in _shipment_cols:
-        cursor.execute("ALTER TABLE shipments ADD COLUMN category TEXT")
-        conn.commit()
+    for col in ("category", "buyer_name", "carrier", "tracking_number", "buyer_contact"):
+        if col not in _shipment_cols:
+            cursor.execute(f"ALTER TABLE shipments ADD COLUMN {col} TEXT")
+            conn.commit()
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_shipments_date        ON shipments(date_shipped)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_batches_shipment_id   ON batches(shipment_id)")

@@ -52,6 +52,17 @@
                    style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;box-sizing:border-box;">
         </div>
 
+        <div style="margin-bottom:16px;display:flex;gap:16px;flex-wrap:wrap;">
+            {% for f, label in [('buyer_name', 'Buyer Name'), ('buyer_contact', 'Buyer Contact Info'),
+                                ('carrier', 'Carrier'), ('tracking_number', 'Tracking #')] %}
+            <div style="flex:1 1 45%;min-width:200px;">
+                <label for="{{ f }}" style="display:block;font-size:13px;font-weight:600;margin-bottom:6px;">{{ label }}</label>
+                <input type="text" id="{{ f }}" name="{{ f }}" value="{{ shipment[f] or '' }}"
+                       style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;box-sizing:border-box;">
+            </div>
+            {% endfor %}
+        </div>
+
         <div style="margin-bottom:24px;">
             <label for="notes" style="display:block;font-size:13px;font-weight:600;margin-bottom:6px;">Notes</label>
             <textarea id="notes" name="notes" rows="3"

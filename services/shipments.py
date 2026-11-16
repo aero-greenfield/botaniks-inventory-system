@@ -75,7 +75,8 @@ def _recompute_batch_status(cursor, db, batch_id):
     """, (batch_id, batch_id, batch_id, batch_id))
 
 
-def create_shipment(lines, destination=None, notes=None, category=None, date_shipped=None):
+def create_shipment(lines, destination=None, notes=None, category=None, date_shipped=None,
+                    buyer_name=None, carrier=None, tracking_number=None, buyer_contact=None):
     """
     Creates one shipment drawing the given quantities from one or more batches.
     `lines` is a dict {batch_id: quantity}. Each batch must be produced (status 'Ready' or
@@ -131,9 +132,11 @@ def create_shipment(lines, destination=None, notes=None, category=None, date_shi
         shipment_number = _generate_shipment_number(cursor, db, date_shipped)
 
         db.execute(cursor, """
-            INSERT INTO shipments (shipment_number, date_shipped, destination, notes, category)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (shipment_number, date_shipped, destination, notes, category))
+            INSERT INTO shipments (shipment_number, date_shipped, destination, notes, category,
+                                   buyer_name, carrier, tracking_number, buyer_contact)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (shipment_number, date_shipped, destination, notes, category,
+              buyer_name, carrier, tracking_number, buyer_contact))
         shipment_id = db.get_last_insert_id(cursor)
 
         for batch_id, qty in normalized.items():
@@ -365,7 +368,8 @@ def get_shipment_by_id(shipment_id):
 
     try:
         db.execute(cursor, """
-            SELECT shipment_id, shipment_number, date_shipped, destination, notes, category
+            SELECT shipment_id, shipment_number, date_shipped, destination, notes, category,
+                   buyer_name, carrier, tracking_number, buyer_contact
             FROM shipments WHERE shipment_id = %s
         """, (shipment_id,))
         row = cursor.fetchone()
@@ -379,6 +383,10 @@ def get_shipment_by_id(shipment_id):
             'destination': row[3],
             'notes': row[4],
             'category': row[5],
+            'buyer_name': row[6],
+            'carrier': row[7],
+            'tracking_number': row[8],
+            'buyer_contact': row[9],
         }
 
         db.execute(cursor, """
@@ -418,7 +426,8 @@ def get_shipment_by_id(shipment_id):
 
 
 def update_shipment(shipment_id, destination=_UNSET, notes=_UNSET, category=_UNSET,
-                     date_shipped=_UNSET, shipment_number=_UNSET, lines=_UNSET):
+                     date_shipped=_UNSET, shipment_number=_UNSET, lines=_UNSET,
+                     buyer_name=_UNSET, carrier=_UNSET, tracking_number=_UNSET, buyer_contact=_UNSET):
     """
     Updates a shipment's editable fields and/or its batch lines.
     - destination/notes/category/date_shipped/shipment_number use the _UNSET sentinel so None
@@ -435,12 +444,13 @@ def update_shipment(shipment_id, destination=_UNSET, notes=_UNSET, category=_UNS
     cursor = db.cursor()
 
     try:
-        db.execute(cursor, """SELECT destination, notes, category, date_shipped, shipment_number
-                              FROM shipments WHERE shipment_id = %s""", (shipment_id,))
+        _cols = ['destination', 'notes', 'category', 'date_shipped', 'shipment_number',
+                 'buyer_name', 'carrier', 'tracking_number', 'buyer_contact']
+        db.execute(cursor, f"SELECT {', '.join(_cols)} FROM shipments WHERE shipment_id = %s", (shipment_id,))
         row = cursor.fetchone()
         if not row:
             raise ValueError(f"Shipment {shipment_id} not found — nothing updated.")
-        before = dict(zip(['destination', 'notes', 'category', 'date_shipped', 'shipment_number'], row))
+        before = dict(zip(_cols, row))
 
         if shipment_number is not _UNSET:
             db.execute(cursor, "SELECT shipment_id FROM shipments WHERE shipment_number = %s AND shipment_id != %s",
@@ -460,6 +470,10 @@ def update_shipment(shipment_id, destination=_UNSET, notes=_UNSET, category=_UNS
             fields['date_shipped'] = date_shipped
         if shipment_number is not _UNSET:
             fields['shipment_number'] = shipment_number
+        for k, v in (('buyer_name', buyer_name), ('carrier', carrier),
+                     ('tracking_number', tracking_number), ('buyer_contact', buyer_contact)):
+            if v is not _UNSET:
+                fields[k] = v
         if fields:
             set_clause = ', '.join(f"{k} = %s" for k in fields)
             params = (*fields.values(), shipment_id)
