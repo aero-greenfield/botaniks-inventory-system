@@ -91,6 +91,10 @@ from services.shipments import (
     # ADDED: materials-on-shipments — lot-level traceability sheet for the per-shipment manifest.
     get_shipment_materials,
 )
+from services.contacts import get_contacts, get_contact, create_contact, update_contact, delete_contact
+
+# Buyer/carrier fields shared by the create- and edit-shipment forms.
+_BUYER_FIELDS = ('buyer_name', 'carrier', 'tracking_number', 'buyer_contact')
 
 
 # Import helper functions for exporting data
@@ -3118,7 +3122,8 @@ def shipments_list():
 def new_shipment_page():
     df, _ = get_batches(page=None)
     batches = df.to_dict('records') if not df.empty else []
-    return render_template('create_shipment.html', batches=batches, today=business_today())
+    return render_template('create_shipment.html', batches=batches, today=business_today(),
+                           contacts=get_contacts())
 
 
 @app.route('/shipments/<int:shipment_id>')
@@ -3186,9 +3191,10 @@ def create_shipment_route():
             back_link=True, back_link_url="/shipments/new", back_link_label="Back to New Shipment"
         ), 400
 
+    buyer = {f: request.form.get(f, '').strip() or None for f in _BUYER_FIELDS}
     try:
         shipment_id = create_shipment(lines, destination=destination, notes=notes,
-                                       category=category, date_shipped=date_shipped)
+                                       category=category, date_shipped=date_shipped, **buyer)
     except ValueError as e:
         return render_template('error.html',
             title="Cannot Create Shipment",
@@ -3202,6 +3208,16 @@ def create_shipment_route():
             message="Failed to create shipment. Check logs for details.",
             back_link=True, back_link_url="/batches", back_link_label="Back to Batches"
         ), 500
+
+    # Shipment is already committed; a failed contact save only warns.
+    if request.form.get('save_contact') and buyer['buyer_name']:
+        try:
+            create_contact(buyer['buyer_name'], buyer['buyer_contact'], destination)
+            flash(f"Saved '{buyer['buyer_name']}' as a shipping contact", 'success')
+        except ValueError as e:
+            flash(f"Contact not saved: {e}", 'warning')
+    elif request.form.get('save_contact'):
+        flash("Contact not saved: buyer name is empty", 'warning')
 
     return redirect(url_for('shipment_detail', shipment_id=shipment_id))
 
@@ -3329,7 +3345,8 @@ def update_shipment_route(shipment_id):
 
     try:
         update_shipment(shipment_id, destination=destination, notes=notes, category=category,
-                         date_shipped=date_shipped, shipment_number=shipment_number, lines=lines)
+                         date_shipped=date_shipped, shipment_number=shipment_number, lines=lines,
+                         **{f: request.form.get(f, '').strip() or None for f in _BUYER_FIELDS})
     except ValueError as e:
         return render_template('error.html',
             title="Cannot Update Shipment",
@@ -3353,6 +3370,71 @@ def delete_shipment_route(shipment_id):
         ), 404
     flash('Shipment deleted — batch quantities returned to available stock', 'success')
     return redirect(url_for('manage_shipments'))
+
+
+# ========================
+# SHIPPING CONTACTS ROUTES
+# ========================
+
+def _contact_form():
+    return (request.form.get('name', '').strip(),
+            request.form.get('contact_info', '').strip() or None,
+            request.form.get('destination', '').strip() or None)
+
+
+def _contact_error(message, back_url="/shipping-contacts"):
+    return render_template('error.html', title="Invalid Contact", message=message,
+        back_link=True, back_link_url=back_url, back_link_label="Back to Contacts"), 400
+
+
+@app.route('/shipping-contacts')
+@requires_auth
+def shipping_contacts():
+    return render_template('shipping_contacts.html', contacts=get_contacts())
+
+
+@app.route('/shipping-contacts/create', methods=['POST'])
+@requires_auth
+def create_contact_route():
+    try:
+        create_contact(*_contact_form())
+    except ValueError as e:
+        return _contact_error(str(e))
+    flash('Contact added', 'success')
+    return redirect(url_for('shipping_contacts'))
+
+
+@app.route('/shipping-contacts/<int:contact_id>/edit')
+@requires_auth
+def edit_contact(contact_id):
+    contact = get_contact(contact_id)
+    if not contact:
+        return render_template('error.html', title="Contact Not Found",
+            message=f"Contact {contact_id} does not exist.",
+            back_link=True, back_link_url="/shipping-contacts", back_link_label="Back to Contacts"), 404
+    return render_template('edit_shipping_contact.html', contact=contact)
+
+
+@app.route('/shipping-contacts/<int:contact_id>/update', methods=['POST'])
+@requires_auth
+def update_contact_route(contact_id):
+    try:
+        update_contact(contact_id, *_contact_form())
+    except ValueError as e:
+        return _contact_error(str(e), f"/shipping-contacts/{contact_id}/edit")
+    flash('Contact updated', 'success')
+    return redirect(url_for('shipping_contacts'))
+
+
+@app.route('/shipping-contacts/<int:contact_id>/delete', methods=['POST'])
+@requires_auth
+def delete_contact_route(contact_id):
+    try:
+        delete_contact(contact_id)
+    except ValueError as e:
+        return _contact_error(str(e))
+    flash('Contact deleted', 'success')
+    return redirect(url_for('shipping_contacts'))
 
 
 @app.route('/export/shipment-manifest/<int:shipment_id>')

@@ -48,6 +48,32 @@
                        style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;box-sizing:border-box;">
             </div>
         </div>
+
+        <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+            <div style="flex:1;min-width:200px;">
+                <label for="contact-picker" style="display:block;font-size:13px;font-weight:600;margin-bottom:6px;">
+                    Saved contact <a href="/shipping-contacts" style="font-weight:400;color:var(--accent);margin-left:6px;">Manage</a>
+                </label>
+                <select id="contact-picker"
+                        style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;box-sizing:border-box;">
+                    <option value="">— Pick to fill buyer —</option>
+                    {% for c in contacts %}
+                    <option data-name="{{ c.name }}" data-contact="{{ c.contact_info or '' }}" data-destination="{{ c.destination or '' }}">{{ c.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% for f, label, ph in [('buyer_name', 'Buyer Name', ''), ('buyer_contact', 'Buyer Contact Info', 'Phone, email…'),
+                                    ('carrier', 'Carrier', 'e.g. UPS, FedEx…'), ('tracking_number', 'Tracking #', '')] %}
+            <div style="flex:1;min-width:160px;">
+                <label for="{{ f }}" style="display:block;font-size:13px;font-weight:600;margin-bottom:6px;">{{ label }}</label>
+                <input type="text" id="{{ f }}" name="{{ f }}" placeholder="{{ ph }}"
+                       style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;box-sizing:border-box;">
+            </div>
+            {% endfor %}
+        </div>
+        <label style="display:inline-flex;align-items:center;gap:6px;margin-top:12px;font-size:13px;">
+            <input type="checkbox" name="save_contact" value="on"> Save buyer as a new contact
+        </label>
     </div>
 
     <div class="table-container">
@@ -110,6 +136,16 @@
     var selectAll = document.getElementById('select-all');
     var toggleBtn = document.getElementById('toggle-components');
     var showComponents = false;
+
+    // Copy the picked contact into the (still editable) form fields — shipments keep their own copy.
+    var picker = document.getElementById('contact-picker');
+    if (picker) picker.addEventListener('change', function() {
+        var o = picker.selectedOptions[0];
+        if (!o || !o.dataset.name) return;  // placeholder option
+        document.getElementById('buyer_name').value = o.dataset.name;
+        document.getElementById('buyer_contact').value = o.dataset.contact;
+        document.getElementById('destination').value = o.dataset.destination;
+    });
 
     function visibleCheckboxes() {
         return Array.from(document.querySelectorAll('.batch-row:not([hidden]) .batch-select'));

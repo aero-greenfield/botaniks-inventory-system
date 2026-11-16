@@ -51,6 +51,7 @@ _TABLES = [
     "shipment_batches",
     "batches",
     "shipments",
+    "shipping_contacts",
     "recipe_materials",
     "recipes",
     "raw_material_lots",

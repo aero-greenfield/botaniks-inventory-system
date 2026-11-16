@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}Shipping Contacts{% endblock %}
+
+{% block content %}
+
+<div class="page-header">
+    <div>
+        <h1>Shipping Contacts</h1>
+        <p class="page-subtitle">Saved buyers to pick from when creating a shipment</p>
+    </div>
+    <a href="/shipments" class="btn btn-secondary">View Shipments</a>
+</div>
+
+<div class="table-container" style="padding:20px 24px;margin-bottom:20px;">
+    <form method="POST" action="/shipping-contacts/create" autocomplete="off"
+          style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="form-group" style="flex:1;min-width:180px;margin:0;">
+            <label for="name">Buyer name</label>
+            <input type="text" id="name" name="name" required>
+        </div>
+        <div class="form-group" style="flex:1;min-width:200px;margin:0;">
+            <label for="contact_info">Contact info</label>
+            <input type="text" id="contact_info" name="contact_info" placeholder="Phone, email…">
+        </div>
+        <div class="form-group" style="flex:1;min-width:200px;margin:0;">
+            <label for="destination">Destination / address</label>
+            <input type="text" id="destination" name="destination">
+        </div>
+        <button type="submit" class="btn btn-primary">+ Add Contact</button>
+    </form>
+</div>
+
+{% if contacts %}
+<div class="table-container">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Buyer name</th>
+                <th>Contact info</th>
+                <th>Destination</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for c in contacts %}
+            <tr>
+                <td><strong>{{ c.name }}</strong></td>
+                <td>{{ c.contact_info or '—' }}</td>
+                <td>{{ c.destination or '—' }}</td>
+                <td style="white-space:nowrap;">
+                    <a href="/shipping-contacts/{{ c.contact_id }}/edit" class="btn btn-secondary" style="padding:5px 12px;font-size:12px;">Edit</a>
+                    <form method="POST" action="/shipping-contacts/{{ c.contact_id }}/delete"
+                          onsubmit="return confirm('Delete this contact? Past shipments keep their details.')"
+                          style="display:inline;" autocomplete="off">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button type="submit" class="btn btn-danger" style="padding:5px 12px;font-size:12px;">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="table-container" style="padding:40px 24px;text-align:center;color:var(--text-muted);">
+    <p>No contacts yet. Add one above, or tick "Save as new contact" when creating a shipment.</p>
+</div>
+{% endif %}
+
+{% endblock %}

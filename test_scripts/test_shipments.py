@@ -168,3 +168,16 @@ def test_update_shipment_number_collision_raises(make_ready_batch):
     s2 = create_shipment({b: 10}, date_shipped="2026-07-16")      # -> 2607161
     with pytest.raises(ValueError):
         update_shipment(s2, shipment_number="2607151")
+
+
+def test_buyer_fields_round_trip(make_ready_batch):
+    a = make_ready_batch("A", 10)
+    s = create_shipment({a: 5}, buyer_name="Acme", carrier="UPS",
+                        tracking_number="1Z999", buyer_contact="acme@example.com")
+    ship = get_shipment_by_id(s)['shipment']
+    assert (ship['buyer_name'], ship['carrier'], ship['tracking_number'], ship['buyer_contact']) == \
+           ("Acme", "UPS", "1Z999", "acme@example.com")
+
+    update_shipment(s, carrier="FedEx", tracking_number=None)
+    ship = get_shipment_by_id(s)['shipment']
+    assert (ship['buyer_name'], ship['carrier'], ship['tracking_number']) == ("Acme", "FedEx", None)

@@ -251,7 +251,11 @@ def init_database():
             date_shipped    TEXT NOT NULL,
             destination     TEXT,
             notes           TEXT,
-            category        TEXT
+            category        TEXT,
+            buyer_name      TEXT,
+            carrier         TEXT,
+            tracking_number TEXT,
+            buyer_contact   TEXT
         )
         """)
     else:
@@ -262,7 +266,11 @@ def init_database():
             date_shipped    TEXT NOT NULL,
             destination     TEXT,
             notes           TEXT,
-            category        TEXT
+            category        TEXT,
+            buyer_name      TEXT,
+            carrier         TEXT,
+            tracking_number TEXT,
+            buyer_contact   TEXT
         )
         """)
 
@@ -394,6 +402,18 @@ def init_database():
 
     print("  ✅ shipment_batches table created")
 
+    # Saved buyers for the create-shipment picker (shipments copy values; no FK).
+    _pk = "SERIAL PRIMARY KEY" if DATABASE_URL else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS shipping_contacts(
+        contact_id   {_pk},
+        name         TEXT NOT NULL,
+        contact_info TEXT,
+        destination  TEXT
+    )
+    """)
+    print("  ✅ shipping_contacts table created")
+
 
    #=============================
    # TABLE 6: audit-logs
@@ -466,6 +486,13 @@ def upgrade_schema():
         conn.commit()
     except Exception:
         conn.rollback()  # column already exists
+    # shipment-contacts feature: buyer/carrier columns (also run manually in Supabase before deploy).
+    for col in ("buyer_name", "carrier", "tracking_number", "buyer_contact"):
+        try:
+            cursor.execute(f"ALTER TABLE shipments ADD COLUMN {col} TEXT")
+            conn.commit()
+        except Exception:
+            conn.rollback()  # column already exists
 
     # MIGRATION: PostgreSQL REAL is single-precision float4 (~6-7 significant digits), so it
     #            silently rounds decimal inputs. CREATE TABLE IF NOT EXISTS never alters columns
